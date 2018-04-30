@@ -78,10 +78,15 @@ DEPS         = $(IMAGE_OBJS:.o=.d) \
 
 all: $(BUILDDIR)/src/clients/python/libcrequest.so $(BUILDDIR)/image_client
 
+# Need to fix protoc compiled imports (see
+# https://github.com/google/protobuf/issues/1491). The 'sed' command
+# below does this fix.
 pip: $(PY_SRCS) $(PROTO_PY) $(BUILDDIR)/src/clients/python/libcrequest.so
 	$(RM) -fr $(BDISTDIR)
 	mkdir -p $(BDISTDIR)/inference_server/api
 	cp $^ $(BDISTDIR)/inference_server/api/.
+	sed -i "s/^import \([^ ]*\)_pb2 as \([^ ]*\)$$/from inference_server.api import \1_pb2 as \2/" \
+    $(BDISTDIR)/inference_server/api/*_pb2.py
 	cp $(PY_SETUP) $(BDISTDIR)/.
 	touch $(BDISTDIR)/inference_server/__init__.py
 	(cd $(BDISTDIR) && python setup.py bdist_wheel)

@@ -28,8 +28,8 @@ syntax = "proto3";
 
 package nvidia.inferenceserver;
 
-// Request header for inferencing the actual input data is delivered
-// separate from the header
+// Request header for inferencing. The actual input data is delivered
+// separate from the header.
 message InferRequestHeader {
   // Input...
   message Input {
@@ -63,12 +63,18 @@ message InferRequestHeader {
     Class cls = 3;
   }
 
+  // Batch size of the inference inputs.
   uint32 batch_size = 1;
+
+  // Inference inputs.
   repeated Input input = 2;
+
+  // Inference outputs that are being requested.
   repeated Output output = 3;
 }
 
-// Response header for inferencing
+// Response header for inferencing. Any raw response data (i.e. tensor
+// values) is delivered separately from the header.
 message InferResponseHeader {
   // Output...
   message Output {
@@ -105,6 +111,15 @@ message InferResponseHeader {
     repeated Classes batch_classes = 3;
   }
 
-  uint32 batch_size = 1;
-  repeated Output output = 2;
+  // Name of the model that produced the results.
+  string model_name = 1;
+
+  // Version of the model that produced the results.
+  uint32 model_version = 2;
+
+  // Batch size of the inference outputs.
+  uint32 batch_size = 3;
+
+  // The outputs
+  repeated Output output = 4;
 }

@@ -1,5 +1,5 @@
 name: "mnist_plan"
-model_platform: "tensorrt_plan"
+platform: "tensorrt_plan"
 max_batch_size: 2
 input [
   {

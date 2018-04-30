@@ -23,6 +23,8 @@
 // OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+//
+// Copyright (c) 2018, TensorFlow Authors. All rights reserved.
 
 syntax = "proto3";
 
@@ -49,17 +51,25 @@ enum DataType {
   TYPE_FP64 = 12;
 }
 
-// An instance of a model and resources made available for that
-// instance
-message ModelInstance {
-  // Optional name of this instance. If not specified the instance
-  // name will be formed as <model name>_<instance number>.
+// A group of one or more instances of a model and resources made
+// available for those instances.
+message ModelInstanceGroup {
+  // Optional name of this group of instances. If not specified the
+  // name will be formed as <model name>_<group number>. The name of
+  // individual instances will be further formed by a unique instance
+  // number and GPU index:
+  //   <name>_<instance number>_gpu<gpu index>
   string name = 1;
 
-  // GPU(s) made available for this instance given as indices in the
-  // manner of CUDA_VISIBLE_DEVICES. If not specified, no GPUs will be
-  // made available to the instance.
-  repeated int32 gpus = 2;
+  // Number of instances in this group created for each GPU listed in
+  // 'gpus'. Default is 1.
+  int32 count = 2;
+
+  // GPU(s) where instances should be available. For each GPU listed,
+  // 'count' instances of the model will be available. Setting 'gpus'
+  // to empty empty (or not specifying at all) is eqivalent to listing
+  // all system GPUs.
+  repeated int32 gpus = 3;
 }
 
 // Input tensor for the model
@@ -94,18 +104,45 @@ message ModelOutput {
   string label_filename = 4;
 }
 
+// Policy indicating which versions of a model should be made
+// available by the inference server.
+message ModelVersionPolicy {
+  // Serve only the 'num_versions' highest-numbered versions.  This is
+  // the default policy and the default value of 'num_versions' is 1,
+  // indicating that by default only the highest-number version of a
+  // model will be served.
+  message Latest {
+    uint32 num_versions = 1;
+  }
+
+  // Serve all versions of the model.
+  message All {
+  }
+
+  // Serve only a specific set of versions of the model.
+  message Specific {
+    repeated int64 versions = 1;
+  }
+
+  // Each model must implement only a single policy. The default
+  // policy is 'Latest'.
+  oneof policy_choice {
+    Latest latest = 1;
+    All all = 2;
+    Specific specific = 3;
+  }
+}
+
 // Model configuration.
 message ModelConfig {
   // Name of the model.
   string name = 1;
 
-  // Base path to the model, excluding the version directory. For
-  // example, for a model at /foo/bar/my_model/123, where 123 is the
-  // version, the base path is /foo/bar/my_model.
-  string base_path = 2;
-
   // Type of model (e.g. "tensorflow").
-  string model_platform = 3;
+  string platform = 2;
+
+  // Policy indicating which version(s) of the model will be served.
+  ModelVersionPolicy version_policy = 3;
 
   // Maximum batch size allowed for inference. This can only decrease
   // what is allowed by the model itself. A value of 0 indicates that
@@ -118,13 +155,21 @@ message ModelConfig {
   repeated ModelInput input = 5;
   repeated ModelOutput output = 6;
 
-  // Instances of this model. For each instance the GPU(s) that should
-  // be made available for that instance given as indices in the
-  // manner of CUDA_VISIBLE_DEVICES. If not specified, one instance of
-  // the model will be instantiated and GPU index 0 will be made
-  // available to the instance.
-  repeated ModelInstance instance = 7;
-}
+  // Optional instances of this model. If not specified, one instance
+  // of the model will be instantiated on each available GPU.
+  repeated ModelInstanceGroup instance_group = 7;
+
+  // Optional filename of the model file to use if a
+  // compute-capability specific model is not specified in
+  // 'cc_model_names'. If not specified the default is model.graphdef
+  // for TF graphdef models and model.plan for TensorRT PLAN models.
+  string default_model_filename = 8;
+
+  // Optional map from CUDA compute capabilities to the filename of
+  // the model that supports that compute capability. The filename
+  // refers to a file within the model version directory.
+  map<string, string> cc_model_filenames = 9;
+ }
 
 // List of model configurations.
 message ModelConfigList {

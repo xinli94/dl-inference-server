@@ -50,7 +50,7 @@ public:
 
   // Create an error from a code.
   // @param code - The status code for the error
-  explicit Error(RequestStatusCode code);
+  explicit Error(RequestStatusCode code = RequestStatusCode::SUCCESS);
 
   // Create an error from a code and detailed message.
   // @param code - The status code for the error
@@ -69,6 +69,10 @@ public:
   // the error.
   const std::string& ServerId() const { return server_id_; }
 
+  // @return the ID of the request associated with this error, or 0
+  // (zero) if no request ID is associated with the error.
+  uint64_t RequestId() const { return request_id_; }
+
   // @return true if this error is "ok"/"success", false if error
   // indicates a failure.
   bool IsOk() const { return code_ == RequestStatusCode::SUCCESS; }
@@ -82,6 +86,7 @@ private:
   RequestStatusCode code_;
   std::string msg_;
   std::string server_id_;
+  uint64_t request_id_;
 };
 
 //==============================================================================
@@ -92,15 +97,16 @@ private:
 // available on that server. Once created a ServerStatusContext object
 // can be used repeatedly to get status from the server. For example:
 //
-//   ServerStatusContext ctx("localhost:8000");
+//   std::unique_ptr<ServerStatusContext> ctx;
+//   ServerStatusContext::Create(&ctx, "localhost:8000");
 //   ServerStatus status;
-//   ctx.GetServerStatus(&status);
+//   ctx->GetServerStatus(&status);
 //   ...
-//   ctx.GetServerStatus(&status);
+//   ctx->GetServerStatus(&status);
 //   ...
 //
 // Thread-safety:
-//   ServerStatusContext contructors are thread-safe.
+//   ServerStatusContext::Create methods are thread-safe.
 //   GetServerStatus() is not thread-safe. For a given
 //   ServerStatusContext, calls to GetServerStatus() must be
 //   serialized.
@@ -109,19 +115,25 @@ class ServerStatusContext {
 public:
   // Create context that returns information about server and all
   // models on the server.
+  // @param ctx - returns the new ServerStatusContext object
   // @param server_url - inference server name and port
   // @param verbose - if true generate verbose output when contacting
   // the inference server
-  explicit ServerStatusContext(
+  // @return Error object indicating success or failure.
+  static Error Create(
+    std::unique_ptr<ServerStatusContext>* ctx,
     const std::string& server_url, bool verbose = false);
 
   // Create context that returns information about server and one
   // model.
+  // @param ctx - returns the new ServerStatusContext object
   // @param server_url - inference server name and port
   // @param model-name - get information for this model
   // @param verbose - if true generate verbose output when contacting
   // the inference server
-  explicit ServerStatusContext(
+  // @return Error object indicating success or failure.
+  static Error Create(
+    std::unique_ptr<ServerStatusContext>* ctx,
     const std::string& server_url, const std::string& model_name,
     bool verbose = false);
 
@@ -133,6 +145,9 @@ public:
 private:
   static size_t ResponseHeaderHandler(void*, size_t, size_t, void*);
   static size_t ResponseHandler(void*, size_t, size_t, void*);
+
+  ServerStatusContext(const std::string&, bool);
+  ServerStatusContext(const std::string&, const std::string&, bool);
 
   // URL for status endpoint on inference server.
   const std::string url_;
@@ -156,22 +171,25 @@ private:
 // model. Options that control how inference is performed can be
 // changed in between inference runs. For example:
 //
-//   InferContext ctx("localhost:8000", "mnist");
+//   std::unique_ptr<InferContext> ctx;
+//   InferContext::Create(&ctx, "localhost:8000", "mnist");
 //   ...
-//   Options* options0 = Options::Create();
+//   std::unique_ptr<Options> options0;
+//   Options::Create(&options0);
 //   options->SetBatchSize(b);
 //   options->AddClassResult(output, topk);
-//   ctx.SetRunOptions(*options0);
+//   ctx->SetRunOptions(*options0);
 //   ...
-//   ctx.Run(&results0);  // run using options0
-//   ctx.Run(&results1);  // run using options0
+//   ctx->Run(&results0);  // run using options0
+//   ctx->Run(&results1);  // run using options0
 //   ...
-//   Options* options1 = Options::Create();
+//   std::unique_ptr<Options> options1;
+//   Options::Create(&options1);
 //   options->AddRawResult(output);
-//   ctx.SetRunOptions(*options);
+//   ctx->SetRunOptions(*options);
 //   ...
-//   ctx.Run(&results2);  // run using options1
-//   ctx.Run(&results3);  // run using options1
+//   ctx->Run(&results2);  // run using options1
+//   ctx->Run(&results3);  // run using options1
 //   ...
 //
 // Note that the Run() calls are not thread-safe but a new Run() can
@@ -180,11 +198,11 @@ private:
 // even after the InferContext object is destroyed.
 //
 // For more parallelism multiple InferContext objects can access the
-// same inference server with not serialization requirements across
+// same inference server with no serialization requirements across
 // those objects.
 //
 // Thread-safety:
-//   InferContext contructors are thread-safe.
+//   InferContext::Create methods are thread-safe.
 //   All other InferContext methods, and nested class methods are not
 //   thread-safe.
 //
@@ -277,6 +295,12 @@ public:
     // (if provided by the model).
     enum ResultFormat { RAW = 0, CLASS = 1 };
 
+    // @return the name of the model that produced this result.
+    virtual const std::string& ModelName() const = 0;
+
+    // @return the version of the model that produced this result.
+    virtual uint32_t ModelVersion() const = 0;
+
     // @return the Output object corresponding to this result.
     virtual const std::shared_ptr<Output> GetOutput() const = 0;
 
@@ -354,8 +378,9 @@ public:
   public:
     virtual ~Options() { };
 
-    // @return a new Options object with default values.
-    static Options* Create();
+    // Create a new Options object with default values.
+    // @return Error object indicating success or failure.
+    static Error Create(std::unique_ptr<Options>* options);
 
     // @return the batch size to use for all subsequent inferences.
     virtual size_t BatchSize() const = 0;
@@ -382,16 +407,26 @@ public:
 
 public:
   // Create context that performs inference for a model.
+  // @param ctx - returns the new InferContext object
   // @param server_url - inference server name and port
   // @param model_name - name of the model to use for inference
+  // @param model_version - version of the model to use for inference,
+  // or -1 to indicate that the latest (i.e. highest version number)
+  // version should be used
   // @param verbose - if true generate verbose output when contacting
   // the inference server
-  explicit InferContext(
-    const std::string& server_url, const std::string& model_name,
-    bool verbose = false);
+  // @return Error object indicating success or failure.
+  static Error Create(
+    std::unique_ptr<InferContext>* ctx, const std::string& server_url,
+    const std::string& model_name, int model_version = -1, bool verbose = false);
 
-  // @return the model name.
+  // @return the model name being used for inference.
   const std::string& ModelName() const { return model_name_; }
+
+  // @return the model version being used for inference. -1 indicates
+  // that the latest (i.e. highest version number) version of that
+  // model is being used.
+  int ModelVersion() const { return model_version_; }
 
   // @return the maximum batch size supported by the context.
   uint64_t MaxBatchSize() const { return max_batch_size_; }
@@ -439,6 +474,8 @@ private:
   static size_t ResponseHeaderHandler(void*, size_t, size_t, void*);
   static size_t ResponseHandler(void*, size_t, size_t, void*);
 
+  InferContext(const std::string&, const std::string&, int, bool);
+
   // Copy into 'buf' up to 'size' bytes of input data. Return the
   // actual amount copied in 'input_bytes'.
   Error GetNextInput(uint8_t* buf, size_t size, size_t* input_bytes);
@@ -449,19 +486,19 @@ private:
     const uint8_t* buf, size_t size, size_t* result_bytes);
 
   // URL to POST to
-  const std::string url_;
+  std::string url_;
 
   // Model name
   const std::string model_name_;
+
+  // Model version
+  const int model_version_;
 
   // If true print verbose output
   const bool verbose_;
 
   // Maximum batch size supported by this context.
   uint64_t max_batch_size_;
-
-  // Did object initialize correctly?
-  bool initialized_;
 
   // The inputs and outputs
   std::vector<std::shared_ptr<Input>> inputs_;
@@ -505,25 +542,29 @@ private:
 // inference server. Once created a ProfileContext object can be used
 // repeatedly. For example:
 //
-//   ProfileContext ctx("localhost:8000");
-//   ctx.StartProfile();
+//   std::unique_ptr<ProfileContext> ctx;
+//   ProfileContext::Create(&ctx, "localhost:8000");
+//   ctx->StartProfile();
 //   ...
-//   ctx.StopProfile();
+//   ctx->StopProfile();
 //   ...
 //
 // Thread-safety:
-//   ProfileContext contructors are thread-safe.  StartProfiling() and
-//   StopProfiling() are not thread-safe. For a given ProfileContext,
-//   calls to these methods must be serialized.
+//   ProfileContext::Create methods are thread-safe.  StartProfiling()
+//   and StopProfiling() are not thread-safe. For a given
+//   ProfileContext, calls to these methods must be serialized.
 //
 class ProfileContext {
 public:
   // Create context that controls profiling on a server.
+  // @param ctx - returns the new ProfileContext object
   // @param server_url - inference server name and port
   // @param verbose - if true generate verbose output when contacting
   // the inference server
-  explicit ProfileContext(
-    const std::string& server_url, bool verbose = false);
+  // @return Error object indicating success or failure.
+  static Error Create(
+    std::unique_ptr<ProfileContext>* ctx, const std::string& server_url,
+    bool verbose = false);
 
   // Start profiling on the inference server
   // @return Error object indicating success or failure
@@ -535,6 +576,8 @@ public:
 
 private:
   static size_t ResponseHeaderHandler(void*, size_t, size_t, void*);
+
+  ProfileContext(const std::string&, bool);
   Error SendCommand(const std::string& cmd_str);
 
   // URL for status endpoint on inference server.

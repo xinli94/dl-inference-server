@@ -70,26 +70,27 @@ static CurlGlobal curl_global;
 const Error Error::Success(RequestStatusCode::SUCCESS);
 
 Error::Error(RequestStatusCode code, const std::string& msg)
-  : code_(code), msg_(msg)
+  : code_(code), msg_(msg), request_id_(0)
 {
 }
 
 Error::Error(RequestStatusCode code)
-  : code_(code)
+  : code_(code), request_id_(0)
 {
 }
 
 Error::Error(const RequestStatus& status)
   : Error(status.code(), status.msg())
 {
-  server_id_ = "unknown"; // FIXME
+  server_id_ = status.server_id();
+  request_id_ = status.request_id();
 }
 
 std::ostream&
 operator<<(std::ostream& out, const Error& err)
 {
   out
-    << "[" << err.server_id_ << "] "
+    << "[" << err.server_id_ << " " << err.request_id_ << "] "
     << RequestStatusCode_Name(err.code_);
   if (!err.msg_.empty()) {
     out << " - " << err.msg_;
@@ -98,6 +99,22 @@ operator<<(std::ostream& out, const Error& err)
 }
 
 //==============================================================================
+Error ServerStatusContext::Create(
+  std::unique_ptr<ServerStatusContext>* ctx, const std::string& server_url,
+  bool verbose)
+{
+  ctx->reset(new ServerStatusContext(server_url, verbose));
+  return Error::Success;
+}
+
+Error ServerStatusContext::Create(
+  std::unique_ptr<ServerStatusContext>* ctx, const std::string& server_url,
+  const std::string& model_name, bool verbose)
+{
+  ctx->reset(new ServerStatusContext(server_url, model_name, verbose));
+  return Error::Success;
+}
+
 ServerStatusContext::ServerStatusContext(
   const std::string& server_url, bool verbose)
   : url_(server_url + "/" + kStatusRESTEndpoint), verbose_(verbose)
@@ -182,7 +199,7 @@ ServerStatusContext::GetServerStatus(ServerStatus* server_status)
     std::cout << server_status->DebugString() << std::endl;
   }
 
-  return Error::Success;
+  return Error(request_status_);
 }
 
 size_t
@@ -282,10 +299,11 @@ OptionsImpl::AddClassResult(
   return Error::Success;
 }
 
-InferContext::Options*
-InferContext::Options::Create()
+Error
+InferContext::Options::Create(std::unique_ptr<InferContext::Options>* options)
 {
-  return new OptionsImpl();
+  options->reset(new OptionsImpl());
+  return Error::Success;
 }
 
 //==============================================================================
@@ -454,6 +472,9 @@ public:
     InferContext::Result::ResultFormat result_format);
   ~ResultImpl() = default;
 
+  const std::string& ModelName() const override { return model_name_; }
+  uint32_t ModelVersion() const override { return model_version_; }
+
   const std::shared_ptr<InferContext::Output> GetOutput() const override {
     return output_;
   }
@@ -470,6 +491,12 @@ public:
   // Get the result format for this result.
   InferContext::Result::ResultFormat ResultFormat() const {
     return result_format_;
+  }
+
+  // Set information about the model that produced this result.
+  void SetModel(const std::string& name, const uint32_t version) {
+    model_name_ = name;
+    model_version_ = version;
   }
 
   // Set results for a CLASS format result.
@@ -492,6 +519,9 @@ private:
   std::vector<std::vector<uint8_t>> bufs_;
   size_t bufs_idx_;
   std::vector<size_t> bufs_pos_;
+
+  std::string model_name_;
+  uint32_t model_version_;
 
   InferResponseHeader::Output class_result_;
   std::vector<size_t> class_pos_;
@@ -524,7 +554,7 @@ ResultImpl::GetRaw(
       Error(
         RequestStatusCode::INVALID_ARG,
         "unexpected batch entry " + std::to_string(batch_idx) +
-        "requested for output '" + output_->Name() +
+        " requested for output '" + output_->Name() +
         "', batch size is " + std::to_string(batch_size_));
   }
 
@@ -694,36 +724,62 @@ ResultImpl::SetNextRawResult(
 
 //==============================================================================
 
+Error
+InferContext::Create(
+  std::unique_ptr<InferContext>* ctx, const std::string& server_url,
+  const std::string& model_name, int model_version, bool verbose)
+{
+  ctx->reset(new InferContext(server_url, model_name, model_version, verbose));
+
+  // Get status of the model and create the inputs and outputs.
+  std::unique_ptr<ServerStatusContext> sctx;
+  Error err =
+    ServerStatusContext::Create(&sctx, server_url, model_name, verbose);
+  if (err.IsOk()) {
+    ServerStatus server_status;
+    err = sctx->GetServerStatus(&server_status);
+    if (err.IsOk()) {
+      const auto& itr = server_status.model_status().find(model_name);
+      if (itr == server_status.model_status().end()) {
+        err =
+          Error(
+            RequestStatusCode::INTERNAL,
+            "unable to find status information for \"" + model_name + "\"");
+      } else {
+        const ModelConfig& model_info = itr->second.config();
+
+        (*ctx)->max_batch_size_ =
+          static_cast<uint64_t>(std::max(0, model_info.max_batch_size()));
+
+        // Create inputs and outputs
+        for (const auto& io : model_info.input()) {
+          (*ctx)->inputs_.emplace_back(std::make_shared<InputImpl>(io));
+        }
+        for (const auto& io : model_info.output()) {
+          (*ctx)->outputs_.emplace_back(std::make_shared<OutputImpl>(io));
+        }
+      }
+    }
+  }
+
+  if (!err.IsOk()) {
+    ctx->reset();
+  }
+
+  return err;
+}
+
 InferContext::InferContext(
-  const std::string& server_url, const std::string& model_name, bool verbose)
-  : url_(server_url + "/" + kInferRESTEndpoint + "/" + model_name),
-    model_name_(model_name), verbose_(verbose), initialized_(false),
-    total_input_byte_size_(0), batch_size_(0),
+  const std::string& server_url, const std::string& model_name,
+  int model_version, bool verbose)
+  : model_name_(model_name), model_version_(model_version),
+    verbose_(verbose), total_input_byte_size_(0), batch_size_(0),
     input_pos_idx_(0), result_pos_idx_(0)
 {
-  // Get status of the model and create the inputs and outputs.
-  ServerStatusContext ctx(server_url, model_name, verbose);
-
-  ServerStatus server_status;
-  Error err = ctx.GetServerStatus(&server_status);
-  if (err.IsOk()) {
-    const auto& itr = server_status.model_status().find(model_name);
-    if (itr != server_status.model_status().end()) {
-      const ModelConfig& model_info = itr->second.config();
-
-      max_batch_size_ =
-        static_cast<uint64_t>(std::max(0, model_info.max_batch_size()));
-
-      // Create inputs and outputs
-      for (const auto& io : model_info.input()) {
-        inputs_.emplace_back(std::make_shared<InputImpl>(io));
-      }
-      for (const auto& io : model_info.output()) {
-        outputs_.emplace_back(std::make_shared<OutputImpl>(io));
-      }
-
-      initialized_ = true;
-    }
+  // URL doesn't contain the version portion if using the latest version.
+  url_ = server_url + "/" + kInferRESTEndpoint + "/" + model_name;
+  if (model_version_ >= 0) {
+    url_ += "/" + std::to_string(model_version_);
   }
 }
 
@@ -731,13 +787,6 @@ Error
 InferContext::GetInput(
   const std::string& name, std::shared_ptr<Input>* input) const
 {
-  if (!initialized_) {
-    return
-      Error(
-        RequestStatusCode::INTERNAL,
-        "failed initializing inference for \"" + model_name_ + "\"");
-  }
-
   for (const auto& io : inputs_) {
     if (io->Name() == name) {
       *input = io;
@@ -755,13 +804,6 @@ Error
 InferContext::GetOutput(
   const std::string& name, std::shared_ptr<Output>* output) const
 {
-  if (!initialized_) {
-    return
-      Error(
-        RequestStatusCode::INTERNAL,
-        "failed initializing inference for \"" + model_name_ + "\"");
-  }
-
   for (const auto& io : outputs_) {
     if (io->Name() == name) {
       *output = io;
@@ -839,13 +881,6 @@ InferContext::Run(std::vector<std::unique_ptr<Result>>* results)
 {
   results->clear();
 
-  if (!initialized_) {
-    return
-      Error(
-        RequestStatusCode::INTERNAL,
-        "failed initializing inference for \"" + model_name_ + "\"");
-  }
-
   if (!curl_global.Status().IsOk()) {
     return curl_global.Status();
   }
@@ -879,7 +914,8 @@ InferContext::Run(std::vector<std::unique_ptr<Result>>* results)
     requested_results_.emplace_back(std::move(rp));
   }
 
-  curl_easy_setopt(curl, CURLOPT_URL, url_.c_str());
+  std::string full_url = url_ + "?format=binary";
+  curl_easy_setopt(curl, CURLOPT_URL, full_url.c_str());
   curl_easy_setopt(curl, CURLOPT_USERAGENT, "libcurl-agent/1.0");
   curl_easy_setopt(curl, CURLOPT_POST, 1L);
   if (verbose_) {
@@ -958,6 +994,7 @@ InferContext::Run(std::vector<std::unique_ptr<Result>>* results)
   // set. Now need to initialize non-RAW results.
   for (auto& rr : requested_results_) {
     ResultImpl* r = reinterpret_cast<ResultImpl*>(rr.get());
+    r->SetModel(infer_response.model_name(), infer_response.model_version());
     switch (r->ResultFormat()) {
       case Result::ResultFormat::RAW:
         r->ResetCursors();
@@ -977,7 +1014,7 @@ InferContext::Run(std::vector<std::unique_ptr<Result>>* results)
 
   results->swap(requested_results_);
 
-  return Error::Success;
+  return Error(request_status_);
 }
 
 size_t
@@ -1109,6 +1146,15 @@ InferContext::SetNextRawResult(
 }
 
 //==============================================================================
+Error
+ProfileContext::Create(
+  std::unique_ptr<ProfileContext>* ctx, const std::string& server_url,
+  bool verbose)
+{
+  ctx->reset(new ProfileContext(server_url, verbose));
+  return Error::Success;
+}
+
 ProfileContext::ProfileContext(
   const std::string& server_url, bool verbose)
   : url_(server_url + "/" + kProfileRESTEndpoint), verbose_(verbose)
@@ -1164,14 +1210,7 @@ ProfileContext::SendCommand(const std::string& cmd_str)
     request_status_.set_msg("profile request did not return status");
   }
 
-  // If request has failing HTTP status or the request's explicit
-  // status is not SUCCESS, then signal an error.
-  if ((http_code != 200) ||
-      (request_status_.code() != RequestStatusCode::SUCCESS)) {
-    return Error(request_status_);
-  }
-
-  return Error::Success;
+  return Error(request_status_);
 }
 
 Error

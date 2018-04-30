@@ -42,6 +42,7 @@ void ErrorDelete(nic::Error* ctx);
 bool ErrorIsOk(nic::Error* ctx);
 const char* ErrorMessage(nic::Error* ctx);
 const char* ErrorServerId(nic::Error* ctx);
+uint64_t ErrorRequestId(nic::Error* ctx);
 
 //==============================================================================
 // ServerStatusContext
@@ -57,7 +58,8 @@ nic::Error* ServerStatusContextGetServerStatus(
 // InferContext
 typedef struct InferContextCtx InferContextCtx;
 nic::Error* InferContextNew(
-  InferContextCtx** ctx, const char* url, const char* model_name, bool verbose);
+  InferContextCtx** ctx, const char* url, const char* model_name,
+  int model_version, bool verbose);
 void InferContextDelete(InferContextCtx* ctx);
 nic::Error* InferContextSetOptions(
   InferContextCtx* ctx, nic::InferContext::Options* options);
@@ -92,6 +94,10 @@ nic::Error* InferContextResultNew(
   InferContextResultCtx** ctx, InferContextCtx* infer_ctx,
   const char* result_name);
 void InferContextResultDelete(InferContextResultCtx* ctx);
+nic::Error* InferContextResultModelName(
+  InferContextResultCtx* ctx, const char** model_name);
+nic::Error* InferContextResultModelVersion(
+  InferContextResultCtx* ctx, uint32_t* model_version);
 nic::Error* InferContextResultDataType(
   InferContextResultCtx* ctx, uint32_t* dtype);
 nic::Error* InferContextResultNextRaw(

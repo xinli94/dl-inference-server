@@ -62,6 +62,12 @@ ErrorServerId(nic::Error* ctx)
   return ctx->ServerId().c_str();
 }
 
+uint64_t
+ErrorRequestId(nic::Error* ctx)
+{
+  return ctx->RequestId();
+}
+
 //==============================================================================
 struct ServerStatusContextCtx {
   std::unique_ptr<nic::ServerStatusContext> ctx;
@@ -73,17 +79,25 @@ ServerStatusContextNew(
   ServerStatusContextCtx** ctx, const char* url,
   const char* model_name, bool verbose)
 {
+  nic::Error err;
+
   ServerStatusContextCtx* lctx = new ServerStatusContextCtx;
   if (model_name == nullptr) {
-    lctx->ctx.reset(new nic::ServerStatusContext(std::string(url), verbose));
+    err =
+      nic::ServerStatusContext::Create(&(lctx->ctx), std::string(url), verbose);
   } else {
-    lctx->ctx.reset(
-      new nic::ServerStatusContext(
-        std::string(url), std::string(model_name), verbose));
+    err =
+      nic::ServerStatusContext::Create(
+        &(lctx->ctx), std::string(url), std::string(model_name), verbose);
   }
 
-  *ctx = lctx;
-  return nullptr;
+  if (err.IsOk()) {
+    *ctx = lctx;
+    return nullptr;
+  }
+
+  *ctx = nullptr;
+  return new nic::Error(err);
 }
 
 void
@@ -111,7 +125,7 @@ ServerStatusContextGetServerStatus(
     }
   }
 
-  return (err.IsOk()) ? nullptr : new nic::Error(err);
+  return new nic::Error(err);
 }
 
 //==============================================================================
@@ -122,14 +136,22 @@ struct InferContextCtx {
 
 nic::Error*
 InferContextNew(
-  InferContextCtx** ctx, const char* url, const char* model_name, bool verbose)
+  InferContextCtx** ctx, const char* url, const char* model_name,
+  int model_version, bool verbose)
 {
   InferContextCtx* lctx = new InferContextCtx;
-  lctx->ctx.reset(
-    new nic::InferContext(std::string(url), std::string(model_name), verbose));
+  nic::Error err =
+    nic::InferContext::Create(
+      &(lctx->ctx), std::string(url), std::string(model_name), model_version,
+      verbose);
 
-  *ctx = lctx;
-  return nullptr;
+  if (err.IsOk()) {
+    *ctx = lctx;
+    return nullptr;
+  }
+
+  *ctx = nullptr;
+  return new nic::Error(err);
 }
 
 void
@@ -143,7 +165,7 @@ InferContextSetOptions(
   InferContextCtx* ctx, nic::InferContext::Options* options)
 {
   nic::Error err = ctx->ctx->SetRunOptions(*options);
-  return (err.IsOk()) ? nullptr : new nic::Error(err);
+  return new nic::Error(err);
 }
 
 nic::Error*
@@ -151,7 +173,7 @@ InferContextRun(InferContextCtx* ctx)
 {
   ctx->results.clear();
   nic::Error err = ctx->ctx->Run(&ctx->results);
-  return (err.IsOk()) ? nullptr : new nic::Error(err);
+  return new nic::Error(err);
 }
 
 //==============================================================================
@@ -159,9 +181,16 @@ nic::Error*
 InferContextOptionsNew(
   nic::InferContext::Options** ctx, uint64_t batch_size)
 {
-  *ctx = nic::InferContext::Options::Create();
-  (*ctx)->SetBatchSize(batch_size);
-  return nullptr;
+  std::unique_ptr<nic::InferContext::Options> uctx;
+  nic::Error err = nic::InferContext::Options::Create(&uctx);
+  if (err.IsOk()) {
+    *ctx = uctx.release();
+    (*ctx)->SetBatchSize(batch_size);
+    return nullptr;
+  }
+
+  *ctx = nullptr;
+  return new nic::Error(err);
 }
 
 void
@@ -181,7 +210,7 @@ InferContextOptionsAddRaw(
     err = ctx->AddRawResult(output);
   }
 
-  return (err.IsOk()) ? nullptr : new nic::Error(err);
+  return new nic::Error(err);
 }
 
 nic::Error*
@@ -195,7 +224,7 @@ InferContextOptionsAddClass(
     err = ctx->AddClassResult(output, count);
   }
 
-  return (err.IsOk()) ? nullptr : new nic::Error(err);
+  return new nic::Error(err);
 }
 
 //==============================================================================
@@ -213,7 +242,7 @@ InferContextInputNew(
     infer_ctx->ctx->GetInput(std::string(input_name), &lctx->input);
 
   *ctx = lctx;
-  return (err.IsOk()) ? nullptr : new nic::Error(err);
+  return new nic::Error(err);
 }
 
 void
@@ -228,7 +257,7 @@ InferContextInputSetRaw(
 {
   nic::Error err =
     ctx->input->SetRaw(reinterpret_cast<const uint8_t*>(data), byte_size);
-  return (err.IsOk()) ? nullptr : new nic::Error(err);
+  return new nic::Error(err);
 }
 
 //==============================================================================
@@ -246,6 +275,7 @@ InferContextResultNew(
   for (auto& r : infer_ctx->results) {
     if ((r != nullptr) && (r->GetOutput()->Name() == result_name)) {
       lctx->result.swap(r);
+      break;
     }
   }
 
@@ -264,6 +294,35 @@ void
 InferContextResultDelete(InferContextResultCtx* ctx)
 {
   delete ctx;
+}
+
+nic::Error*
+InferContextResultModelName(InferContextResultCtx* ctx, const char** model_name)
+{
+  if (ctx->result == nullptr) {
+    return
+      new nic::Error(
+        ni::RequestStatusCode::INTERNAL,
+        "model name not available for empty result");
+  }
+
+  *model_name = ctx->result->ModelName().c_str();
+  return nullptr;
+}
+
+nic::Error*
+InferContextResultModelVersion(
+  InferContextResultCtx* ctx, uint32_t* model_version)
+{
+  if (ctx->result == nullptr) {
+    return
+      new nic::Error(
+        ni::RequestStatusCode::INTERNAL,
+        "model version not available for empty result");
+  }
+
+  *model_version = ctx->result->ModelVersion();
+  return nullptr;
 }
 
 nic::Error*
@@ -301,7 +360,7 @@ InferContextResultNextRaw(
     *val_len = buf->size();
   }
 
-  return (err.IsOk()) ? nullptr : new nic::Error(err);
+  return new nic::Error(err);
 }
 
 nic::Error*
@@ -316,7 +375,7 @@ InferContextResultClassCount(
   }
 
   nic::Error err = ctx->result->GetClassCount(batch_idx, count);
-  return (err.IsOk()) ? nullptr : new nic::Error(err);
+  return new nic::Error(err);
 }
 
 nic::Error*
@@ -339,5 +398,5 @@ InferContextResultNextClass(
     *label = cr.label.c_str();
   }
 
-  return (err.IsOk()) ? nullptr : new nic::Error(err);
+  return new nic::Error(err);
 }

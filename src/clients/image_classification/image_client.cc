@@ -135,22 +135,27 @@ Preprocess(
 
 void
 Infer(
-  nic::InferContext& ctx, const size_t batch_size, const size_t topk,
-  const std::vector<uint8_t>& input_data,
+  std::unique_ptr<nic::InferContext>& ctx, const size_t batch_size,
+  const size_t topk, const std::vector<uint8_t>& input_data,
   std::vector<std::unique_ptr<nic::InferContext::Result>>* results,
   const bool verbose = false)
 {
   nic::Error err(ni::RequestStatusCode::SUCCESS);
 
   // Already verified that there is 1 input and 1 output
-  const auto& input = ctx.Inputs()[0];
+  const auto& input = ctx->Inputs()[0];
 
   // Prepare context for 'batch_size' batches.
-  std::unique_ptr<nic::InferContext::Options>
-    options(nic::InferContext::Options::Create());
+  std::unique_ptr<nic::InferContext::Options> options;
+  err = nic::InferContext::Options::Create(&options);
+  if (!err.IsOk()) {
+    std::cerr << "failed initializing infer options: " << err << std::endl;
+    exit(1);
+  }
+
   options->SetBatchSize(batch_size);
-  options->AddClassResult(ctx.Outputs()[0], topk);
-  err = ctx.SetRunOptions(*options);
+  options->AddClassResult(ctx->Outputs()[0], topk);
+  err = ctx->SetRunOptions(*options);
   if (!err.IsOk()) {
     std::cerr << "failed initializing batch size: " << err << std::endl;
     exit(1);
@@ -172,7 +177,7 @@ Infer(
     }
   }
 
-  err = ctx.Run(results);
+  err = ctx->Run(results);
   if (!err.IsOk()) {
     std::cerr << "failed sending infer request: " << err << std::endl;
     exit(1);
@@ -271,8 +276,10 @@ Usage(char** argv, const std::string& msg = std::string())
   std::cerr << "\t-v" << std::endl;
   std::cerr << "\t-b <batch size>" << std::endl;
   std::cerr << "\t-c <topk>" << std::endl;
-  std::cerr << "\t-s <NONE,|INCEPTION|VGG>" << std::endl;
+  std::cerr << "\t-s <NONE|INCEPTION|VGG>" << std::endl;
+  std::cerr << "\t-p <proprocessed output filename>" << std::endl;
   std::cerr << "\t-m <model name>" << std::endl;
+  std::cerr << "\t-x <model version>" << std::endl;
   std::cerr << "\t-u <URL for inference service>" << std::endl;
   std::cerr << std::endl;
   std::cerr
@@ -287,6 +294,9 @@ Usage(char** argv, const std::string& msg = std::string())
     << "    INCEPTION: scale each pixel RGB value to [-1.0, 1.0)." << std::endl
     << "    VGG: subtract mean BGR value (104, 117, 123) from"
     << std::endl << "         each pixel." << std::endl;
+  std::cerr
+    << "If -x is not specified the most recent version (that is, the highest "
+    << "numbered version) of the model will be used." << std::endl;
   std::cerr
     << "For -u, the default server URL is localhost:8000." << std::endl;
   std::cerr << std::endl;
@@ -346,32 +356,32 @@ ParseType(const ni::DataType& dtype, int* type1, int* type3)
 
 void
 ParseModel(
-  const nic::InferContext& ctx, const size_t batch_size,
+  const std::unique_ptr<nic::InferContext>& ctx, const size_t batch_size,
   size_t* c, size_t* h, size_t* w,
   ni::ModelInput::Format* format, int* type1, int* type3,
   bool verbose = false)
 {
-  if (ctx.Inputs().size() != 1) {
+  if (ctx->Inputs().size() != 1) {
     std::cerr
-      << "expecting 1 input, model \"" << ctx.ModelName() << "\" has "
-      << ctx.Inputs().size() << std::endl;
+      << "expecting 1 input, model \"" << ctx->ModelName() << "\" has "
+      << ctx->Inputs().size() << std::endl;
     exit(1);
   }
 
-  if (ctx.Outputs().size() != 1) {
+  if (ctx->Outputs().size() != 1) {
     std::cerr
-      << "expecting 1 output, model \"" << ctx.ModelName() << "\" has "
-      << ctx.Outputs().size() << std::endl;
+      << "expecting 1 output, model \"" << ctx->ModelName() << "\" has "
+      << ctx->Outputs().size() << std::endl;
     exit(1);
   }
 
-  const auto& input = ctx.Inputs()[0];
-  const auto& output = ctx.Outputs()[0];
+  const auto& input = ctx->Inputs()[0];
+  const auto& output = ctx->Outputs()[0];
 
   if (output->DType() != ni::DataType::TYPE_FP32) {
     std::cerr
       << "expecting model output datatype to be TYPE_FP32, model \""
-      << ctx.ModelName() << "\" output type is "
+      << ctx->ModelName() << "\" output type is "
       << ni::DataType_Name(output->DType()) << std::endl;
     exit(1);
   }
@@ -392,7 +402,7 @@ ParseModel(
 
   *format = input->Format();
 
-  int max_batch_size = ctx.MaxBatchSize();
+  int max_batch_size = ctx->MaxBatchSize();
 
   // Model specifying maximum batch size of 0 indicates that batching
   // is not supported and so the input tensors do not expect a "N"
@@ -401,7 +411,7 @@ ParseModel(
   if (max_batch_size == 0) {
     if (batch_size != 1) {
       std::cerr
-        << "batching not supported for model \"" << ctx.ModelName() << "\""
+        << "batching not supported for model \"" << ctx->ModelName() << "\""
         << std::endl;
       exit(1);
     }
@@ -410,7 +420,7 @@ ParseModel(
     if (batch_size > (size_t)max_batch_size) {
       std::cerr
         << "expecting batch size <= " << max_batch_size << " for model \""
-        << ctx.ModelName() << "\"" << std::endl;
+        << ctx->ModelName() << "\"" << std::endl;
       exit(1);
     }
   }
@@ -418,7 +428,7 @@ ParseModel(
   if (input->Dims().size() != 3) {
     std::cerr
       << "expecting model input to have 3 dimensions, model \""
-      << ctx.ModelName() << "\" input has " << input->Dims().size()
+      << ctx->ModelName() << "\" input has " << input->Dims().size()
       << std::endl;
     exit(1);
   }
@@ -449,7 +459,7 @@ ParseModel(
     std::cerr
       << "unexpected input datatype \""
       << ni::DataType_Name(input->DType())
-      << "\" for model \"" << ctx.ModelName() << std::endl;
+      << "\" for model \"" << ctx->ModelName() << std::endl;
     exit(1);
   }
 }
@@ -463,12 +473,14 @@ main(int argc, char** argv)
   size_t batch_size = 1;
   size_t topk = 1;
   ScaleType scale = ScaleType::NONE;
+  std::string preprocess_output_filename;
   std::string model_name;
+  int model_version = -1;
   std::string url("localhost:8000");
 
   // Parse commandline...
   int opt;
-  while ((opt = getopt(argc, argv, "vu:m:b:c:s:")) != -1) {
+  while ((opt = getopt(argc, argv, "vu:m:x:b:c:s:p:")) != -1) {
     switch (opt) {
       case 'v':
         verbose = true;
@@ -479,6 +491,9 @@ main(int argc, char** argv)
       case 'm':
         model_name = optarg;
         break;
+      case 'x':
+        model_version = atoi(optarg);
+        break;
       case 'b':
         batch_size = atoi(optarg);
         break;
@@ -487,6 +502,9 @@ main(int argc, char** argv)
         break;
       case 's':
         scale = ParseScale(optarg);
+        break;
+      case 'p':
+        preprocess_output_filename = optarg;
         break;
       case '?':
         Usage(argv);
@@ -504,7 +522,14 @@ main(int argc, char** argv)
   // Create the context for inference of the specified model. From it
   // extract and validate that the model meets the requirements for
   // image classification.
-  nic::InferContext ctx(url, model_name, verbose);
+  std::unique_ptr<nic::InferContext> ctx;
+  nic::Error err =
+    nic::InferContext::Create(&ctx, url, model_name, model_version, verbose);
+  if (!err.IsOk()) {
+    std::cerr
+      << "error: unable to create inference context: " << err << std::endl;
+    exit(1);
+  }
 
   size_t c, h, w;
   ni::ModelInput::Format format;
@@ -532,6 +557,12 @@ main(int argc, char** argv)
   // Pre-process the image to match input size expected by the model.
   std::vector<uint8_t> input_data;
   Preprocess(img, format, type1, type3, c, cv::Size(w, h), scale, &input_data);
+
+  if (!preprocess_output_filename.empty()) {
+    std::ofstream output_file(preprocess_output_filename);
+    std::ostream_iterator<uint8_t> output_iterator(output_file);
+    std::copy(input_data.begin(), input_data.end(), output_iterator);
+  }
 
   // Run inference to get output
   std::vector<std::unique_ptr<nic::InferContext::Result>> results;

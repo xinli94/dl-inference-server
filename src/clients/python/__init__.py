@@ -32,12 +32,20 @@ import pkg_resources
 import inference_server.api.model_config_pb2
 from inference_server.api.server_status_pb2 import ServerStatus
 
+class _utf8(object):
+    @classmethod
+    def from_param(cls, value):
+        if isinstance(value, bytes):
+            return value
+        else:
+            return value.encode('utf8')
+
 _crequest_path = pkg_resources.resource_filename('inference_server.api', 'libcrequest.so')
 _crequest = cdll.LoadLibrary(_crequest_path)
 
 _crequest_error_new = _crequest.ErrorNew
 _crequest_error_new.restype = c_void_p
-_crequest_error_new.argtypes = [c_char_p]
+_crequest_error_new.argtypes = [_utf8]
 _crequest_error_del = _crequest.ErrorDelete
 _crequest_error_del.argtypes = [c_void_p]
 _crequest_error_isok = _crequest.ErrorIsOk
@@ -49,10 +57,13 @@ _crequest_error_msg.argtypes = [c_void_p]
 _crequest_error_serverid = _crequest.ErrorServerId
 _crequest_error_serverid.restype = c_char_p
 _crequest_error_serverid.argtypes = [c_void_p]
+_crequest_error_requestid = _crequest.ErrorRequestId
+_crequest_error_requestid.restype = c_int64
+_crequest_error_requestid.argtypes = [c_void_p]
 
 _crequest_status_ctx_new = _crequest.ServerStatusContextNew
 _crequest_status_ctx_new.restype = c_void_p
-_crequest_status_ctx_new.argtypes = [POINTER(c_void_p), c_char_p, c_char_p, c_bool]
+_crequest_status_ctx_new.argtypes = [POINTER(c_void_p), _utf8, _utf8, c_bool]
 _crequest_status_ctx_del = _crequest.ServerStatusContextDelete
 _crequest_status_ctx_del.argtypes = [c_void_p]
 _crequest_status_ctx_get = _crequest.ServerStatusContextGetServerStatus
@@ -61,7 +72,7 @@ _crequest_status_ctx_get.argtypes = [c_void_p, POINTER(c_char_p), POINTER(c_uint
 
 _crequest_infer_ctx_new = _crequest.InferContextNew
 _crequest_infer_ctx_new.restype = c_void_p
-_crequest_infer_ctx_new.argtypes = [POINTER(c_void_p), c_char_p, c_char_p, c_bool]
+_crequest_infer_ctx_new.argtypes = [POINTER(c_void_p), _utf8, _utf8, c_int, c_bool]
 _crequest_infer_ctx_del = _crequest.InferContextDelete
 _crequest_infer_ctx_del.argtypes = [c_void_p]
 _crequest_infer_ctx_set_options = _crequest.InferContextSetOptions
@@ -78,14 +89,14 @@ _crequest_infer_ctx_options_del = _crequest.InferContextOptionsDelete
 _crequest_infer_ctx_options_del.argtypes = [c_void_p]
 _crequest_infer_ctx_options_add_raw = _crequest.InferContextOptionsAddRaw
 _crequest_infer_ctx_options_add_raw.restype = c_void_p
-_crequest_infer_ctx_options_add_raw.argtypes = [c_void_p, c_void_p, c_char_p]
+_crequest_infer_ctx_options_add_raw.argtypes = [c_void_p, c_void_p, _utf8]
 _crequest_infer_ctx_options_add_class = _crequest.InferContextOptionsAddClass
 _crequest_infer_ctx_options_add_class.restype = c_void_p
-_crequest_infer_ctx_options_add_class.argtypes = [c_void_p, c_void_p, c_char_p, c_uint64]
+_crequest_infer_ctx_options_add_class.argtypes = [c_void_p, c_void_p, _utf8, c_uint64]
 
 _crequest_infer_ctx_input_new = _crequest.InferContextInputNew
 _crequest_infer_ctx_input_new.restype = c_void_p
-_crequest_infer_ctx_input_new.argtypes = [POINTER(c_void_p), c_void_p, c_char_p]
+_crequest_infer_ctx_input_new.argtypes = [POINTER(c_void_p), c_void_p, _utf8]
 _crequest_infer_ctx_input_del = _crequest.InferContextInputDelete
 _crequest_infer_ctx_input_del.argtypes = [c_void_p]
 _crequest_infer_ctx_input_set_raw = _crequest.InferContextInputSetRaw
@@ -94,9 +105,15 @@ _crequest_infer_ctx_input_set_raw.argtypes = [c_void_p, c_void_p, c_uint64]
 
 _crequest_infer_ctx_result_new = _crequest.InferContextResultNew
 _crequest_infer_ctx_result_new.restype = c_void_p
-_crequest_infer_ctx_result_new.argtypes = [POINTER(c_void_p), c_void_p, c_char_p]
+_crequest_infer_ctx_result_new.argtypes = [POINTER(c_void_p), c_void_p, _utf8]
 _crequest_infer_ctx_result_del = _crequest.InferContextResultDelete
 _crequest_infer_ctx_result_del.argtypes = [c_void_p]
+_crequest_infer_ctx_result_modelname = _crequest.InferContextResultModelName
+_crequest_infer_ctx_result_modelname.restype = c_void_p
+_crequest_infer_ctx_result_modelname.argtypes = [c_void_p, POINTER(c_char_p)]
+_crequest_infer_ctx_result_modelver = _crequest.InferContextResultModelVersion
+_crequest_infer_ctx_result_modelver.restype = c_void_p
+_crequest_infer_ctx_result_modelver.argtypes = [c_void_p, POINTER(c_uint32)]
 _crequest_infer_ctx_result_dtype = _crequest.InferContextResultDataType
 _crequest_infer_ctx_result_dtype.restype = c_void_p
 _crequest_infer_ctx_result_dtype.argtypes = [c_void_p, POINTER(c_uint32)]
@@ -114,12 +131,18 @@ _crequest_infer_ctx_result_next_class.argtypes = [c_void_p, c_uint64, POINTER(c_
 
 
 def _raise_if_error(err):
+    """
+    Raise InferenceServerException if 'err' is non-success.
+    Otherwise return the request ID.
+    """
     if err.value is not None:
         ex = InferenceServerException(err)
         isok = _crequest_error_isok(err)
         _crequest_error_del(err)
         if not isok:
             raise ex
+        return ex.request_id()
+    return 0
 
 def _raise_error(msg):
     err = c_void_p(_crequest_error_new(msg))
@@ -138,14 +161,20 @@ class InferenceServerException(Exception):
         """
         self._msg = None
         self._server_id = None
+        self._request_id = 0
         if (err is not None) and (err.value is not None):
             self._msg = _crequest_error_msg(err)
+            if self._msg is not None:
+                self._msg = self._msg.decode('utf-8')
             self._server_id = _crequest_error_serverid(err)
+            if self._server_id is not None:
+                self._server_id = self._server_id.decode('utf-8')
+            self._request_id = _crequest_error_requestid(err)
 
     def __str__(self):
         msg = super().__str__() if self._msg is None else self._msg
         if self._server_id is not None:
-            msg = '[' + self._server_id + '] - ' + msg
+            msg = '[' + self._server_id + ' ' + str(self._request_id) + '] ' + msg
         return msg
 
     def message(self):
@@ -161,6 +190,13 @@ class InferenceServerException(Exception):
         None if no server is associated.
         """
         return self._server_id
+
+    def request_id(self):
+        """
+        @return the ID of the request associated with this exception, or
+        0 (zero) if no request is associated.
+        """
+        return self._request_id
 
 class ServerStatusContext:
     """
@@ -178,6 +214,7 @@ class ServerStatusContext:
 
         verbose - If True generate verbose output.
         """
+        self._last_request_id = 0
         self._ctx = c_void_p()
         _raise_if_error(
             c_void_p(
@@ -211,18 +248,28 @@ class ServerStatusContext:
 
         Raises InferenceServerException if unable to get status.
         """
+        self._last_request_id = None
         if self._ctx is None:
             _raise_error("ServerStatusContext is closed")
 
         cstatus = c_char_p()
         cstatus_len = c_uint32()
-        _raise_if_error(c_void_p(_crequest_status_ctx_get(self._ctx, byref(cstatus), byref(cstatus_len))))
-
+        self._last_request_id = _raise_if_error(
+            c_void_p(_crequest_status_ctx_get(
+                self._ctx, byref(cstatus), byref(cstatus_len))))
         status_buf = cast(cstatus, POINTER(c_byte * cstatus_len.value))[0]
 
         status = ServerStatus()
         status.ParseFromString(status_buf)
         return status
+
+    def get_last_request_id(self):
+        """
+        Get the request ID of the most recent get_server_status() request,
+        or None if a request has not yet been made or if the last request
+        was not successful.
+        """
+        return self._last_request_id
 
 
 class InferContext:
@@ -231,6 +278,7 @@ class InferContext:
     server for a specific model. Once created an InferContext object
     can be used repeatedly to perform inference using the model.
     """
+
     class ResultFormat:
         # RAW - All values of the output are returned as an numpy
         # array of the appropriate type.
@@ -239,19 +287,29 @@ class InferContext:
         # are returned as an array of (index, value, label) tuples.
         CLASS = 2
 
-    def __init__(self, url, model_name, verbose=False):
+    def __init__(self, url, model_name, model_version=None, verbose=False):
         """Initialize the context.
 
         url - The inference server URL, e.g. localhost:8000.
 
         model_name - The name of the model to use for inference.
 
+        model_version - The version of the model to use for inference,
+        or None to indicate that the latest (i.e. highest version number)
+        version should be used.
+
         verbose - If True generate verbose output.
         """
+        self._last_request_id = None
+        self._last_request_model_name = None
+        self._last_request_model_version = None
         self._ctx = c_void_p()
+
+        imodel_version = -1 if model_version is None else model_version
         _raise_if_error(
             c_void_p(
-                _crequest_infer_ctx_new(byref(self._ctx), url, model_name, verbose)))
+                _crequest_infer_ctx_new(
+                    byref(self._ctx), url, model_name, imodel_version, verbose)))
 
     def __del__(self):
         # when module is unloading may get called after
@@ -332,6 +390,10 @@ class InferContext:
         the size of input data does not match expectations, if unknown output
         names are specified or if server fails to perform inference.
         """
+        self._last_request_id = None
+        self._last_request_model_name = None
+        self._last_request_model_version = None
+
         # Set run options using formats specified in 'outputs'
         options = c_void_p()
         try:
@@ -372,7 +434,7 @@ class InferContext:
                 _crequest_infer_ctx_input_del(input)
 
         # Run inference...
-        _raise_if_error(c_void_p(_crequest_infer_ctx_run(self._ctx)))
+        self._last_request_id = _raise_if_error(c_void_p(_crequest_infer_ctx_run(self._ctx)))
 
         # Create the result map.
         results = dict()
@@ -381,6 +443,23 @@ class InferContext:
             try:
                 _raise_if_error(
                     c_void_p(_crequest_infer_ctx_result_new(byref(result), self._ctx, output_name)))
+
+                # The model name and version are the same for every
+                # result so only set once
+                if self._last_request_model_name is None:
+                    cmodelname = c_char_p()
+                    _raise_if_error(
+                        c_void_p(
+                            _crequest_infer_ctx_result_modelname(result, byref(cmodelname))))
+                    if cmodelname.value is not None:
+                        self._last_request_model_name = cmodelname.value.decode('utf-8')
+                if self._last_request_model_version is None:
+                    cmodelver = c_uint32()
+                    _raise_if_error(
+                        c_void_p(
+                            _crequest_infer_ctx_result_modelver(result, byref(cmodelver))))
+                    self._last_request_model_version = cmodelver.value
+
                 result_dtype = self._get_result_numpy_dtype(result)
                 results[output_name] = list()
                 if output_format == InferContext.ResultFormat.RAW:
@@ -407,7 +486,8 @@ class InferContext:
                                 c_void_p(
                                     _crequest_infer_ctx_result_next_class(
                                         result, b, byref(cidx), byref(cprob), byref(clabel))))
-                            classes.append((cidx.value, cprob.value, clabel.value))
+                            label = None if clabel.value is None else clabel.value.decode('utf-8')
+                            classes.append((cidx.value, cprob.value, label))
                         results[output_name].append(classes)
                 else:
                     _raise_error("unrecognized output format")
@@ -415,3 +495,27 @@ class InferContext:
                 _crequest_infer_ctx_result_del(result)
 
         return results
+
+    def get_last_request_id(self):
+        """
+        Get the request ID of the most recent run() request,
+        or None if a request has not yet been made or if the last request
+        was not successful.
+        """
+        return self._last_request_id
+
+    def get_last_request_model_name(self):
+        """
+        Get the name of the model that performed the most recent run() request,
+        or None if a request has not yet been made or if the last request
+        was not successful.
+        """
+        return self._last_request_model_name
+
+    def get_last_request_model_version(self):
+        """
+        Get the versiob of the model that performed the most recent run() request,
+        or None if a request has not yet been made or if the last request
+        was not successful.
+        """
+        return self._last_request_model_version

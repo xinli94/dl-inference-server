@@ -12,8 +12,10 @@ library to execute image classification models on the inference
 server.
 
 The inference server itself is delivered as a containerized solution
-from the [NVIDIA GPU Cloud](https://www.nvidia.com/en-us/gpu-cloud/). See the
-[Inference Container User Guide](http://docs.nvidia.com/deeplearning/dgx/index.html)
+from the [NVIDIA GPU
+Cloud](https://www.nvidia.com/en-us/gpu-cloud/). See the [Inference
+Container User
+Guide](https://docs.nvidia.com/deeplearning/dgx/inference-user-guide/index.html)
 for information on how to install and configure the inference server.
 
 ## Branches
@@ -22,9 +24,10 @@ for information on how to install and configure the inference server.
  the currently released NVIDIA Inference Server container, but not
  guaranteed.
 
-**18.04**: Branch compatible with NVIDIA Inference Server 18.04.
+**yy.mm**: Branch compatible with NVIDIA Inference Server yy.mm, for
+  example 18.05.
 
-## Building The Clients
+## Building the Clients
 
 Before building the client libraries and applications you must first
 install some prerequisites. The following instructions assume Ubuntu
@@ -46,7 +49,7 @@ Creating the whl file for the Python client library requires setuptools.
 
     pip install --no-cache-dir --upgrade setuptools
 
-With those prerequisites installed the C++ and Python client libraries
+With those prerequisites installed, the C++ and Python client libraries
 and example image\_client application can be built:
 
     make -f Makefile.clients all pip
@@ -70,10 +73,11 @@ a single classification output.
 A simple TensorRT MNIST model is provided in the examples/models
 directory that we can use to demonstrate image\_client. Following the
 instructions in the [Inference Container User
-Guide](http://docs.nvidia.com/deeplearning/dgx/index.html), launch the
-inference server container pointing to that model store. For example:
+Guide](https://docs.nvidia.com/deeplearning/dgx/inference-user-guide/index.html),
+launch the inference server container pointing to that model store.
+For example:
 
-    nvidia-docker run --rm --shm-size=1g --ulimit memlock=-1 --ulimit stack=67108864 -p8000:8000 --mount type=bind,source=/path/to/dl-inference-server/examples/models,target=/tmp/models nvcr.io/nvidia/inferenceserver:18.04 /opt/inference_server/bin/inference_server --model_base_path=/tmp/models
+    nvidia-docker run --rm --shm-size=1g --ulimit memlock=-1 --ulimit stack=67108864 -p8000:8000 --mount type=bind,source=/path/to/dl-inference-server/examples/models,target=/tmp/models nvcr.io/nvidia/inferenceserver:18.05 /opt/inference_server/bin/inference_server --model_base_path=/tmp/models
 
 Replace /path/to/dl-inference-server/examples/models with the
 corresponding path in your local clone of this repo. Once the server
@@ -117,20 +121,26 @@ inferencing (error checking not included to improve clarity, see
 image_client.cc for full error checking):
 
 ```c++
-// Create the context object for inferencing using the 'mnist' model.
-InferContext ctx("localhost:8000", "mnist");
+// Create the context object for inferencing using the latest version
+// of the 'mnist' model.
+std::unique_ptr<InferContext> ctx;
+InferContext::Create(&ctx, "localhost:8000", "mnist");
 
 // Get handle to model input and output.
-const InferContext::Input& input = ctx.GetInput(input_name);
-const InferContext::Output& output = ctx.GetOutput(output_name);
+std::shared_ptr<InferContext::Input> input;
+ctx->GetInput(input_name, &input);
+
+std::shared_ptr<InferContext::Output> output;
+ctx->GetOutput(output_name, &output);
 
 // Set options so that subsequent inference runs are for a given batch_size
 // and return a result for ‘output’. The ‘output’ result is returned as a
 // classification result of the ‘k’ most probable classes.
-InferContext::Options* options = InferContext::Options::Create();
+std::unique_ptr<InferContext::Options> options;
+InferContext::Options::Create(&options);
 options->SetBatchSize(batch_size);
 options->AddClassResult(output, k);
-ctx.SetRunOptions(*options);
+ctx->SetRunOptions(*options);
 
 // Provide input data for each batch.
 input->Reset();
@@ -142,7 +152,7 @@ for (size_t i = 0; i < batch_size; ++i) {
 // can be used for another inference run. Results are owned by the caller
 // and can be retained as long as necessary.
 std::vector<std::unique_ptr<InferContext::Result>> results;
-ctx.Run(&results);
+ctx->Run(&results);
 
 // For each entry in the batch print the top prediction.
 for (size_t i = 0; i < batch_size; ++i) {
