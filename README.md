@@ -77,7 +77,7 @@ Guide](https://docs.nvidia.com/deeplearning/dgx/inference-user-guide/index.html)
 launch the inference server container pointing to that model store.
 For example:
 
-    nvidia-docker run --rm --shm-size=1g --ulimit memlock=-1 --ulimit stack=67108864 -p8000:8000 --mount type=bind,source=/path/to/dl-inference-server/examples/models,target=/tmp/models nvcr.io/nvidia/inferenceserver:18.05 /opt/inference_server/bin/inference_server --model_base_path=/tmp/models
+    nvidia-docker run --rm --shm-size=1g --ulimit memlock=-1 --ulimit stack=67108864 -p8000:8000 --mount type=bind,source=/path/to/dl-inference-server/examples/models,target=/tmp/models nvcr.io/nvidia/inferenceserver:18.05 /opt/inference_server/bin/inference_server --model-store=/tmp/models
 
 Replace /path/to/dl-inference-server/examples/models with the
 corresponding path in your local clone of this repo. Once the server

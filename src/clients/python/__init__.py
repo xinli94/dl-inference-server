@@ -514,7 +514,7 @@ class InferContext:
 
     def get_last_request_model_version(self):
         """
-        Get the versiob of the model that performed the most recent run() request,
+        Get the version of the model that performed the most recent run() request,
         or None if a request has not yet been made or if the last request
         was not successful.
         """
