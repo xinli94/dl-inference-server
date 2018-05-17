@@ -35,7 +35,9 @@ from inference_server.api.server_status_pb2 import ServerStatus
 class _utf8(object):
     @classmethod
     def from_param(cls, value):
-        if isinstance(value, bytes):
+        if value is None:
+            return None
+        elif isinstance(value, bytes):
             return value
         else:
             return value.encode('utf8')
