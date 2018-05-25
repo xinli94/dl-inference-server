@@ -427,6 +427,8 @@ class InferContext:
                     c_void_p(_crequest_infer_ctx_input_new(byref(input), self._ctx, input_name)))
 
                 for input_value in input_values:
+                    if not input_value.flags['C_CONTIGUOUS']:
+                        input_value = np.ascontiguousarray(input_value)
                     _raise_if_error(
                         c_void_p(
                             _crequest_infer_ctx_input_set_raw(

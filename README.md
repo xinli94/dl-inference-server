@@ -5,11 +5,11 @@ optimized for NVIDIA GPUs. The server provides an inference service
 via an HTTP endpoint, allowing remote clients to request inferencing
 for any model being managed by the server.
 
-This repo contains a C++ and Python client libraries that make it easy
-to communicate with an inference server. Also included is
-*image\_client*, an example C++ application that uses the C++ client
-library to execute image classification models on the inference
-server.
+This repo contains C++ and Python client libraries that make it easy
+to communicate with the inference server. Also included are C++ and
+Python versions of *image\_client*, an example application that uses
+the C++ or Python client library to execute image classification
+models on the inference server.
 
 The inference server itself is delivered as a containerized solution
 from the [NVIDIA GPU
@@ -32,10 +32,11 @@ for information on how to install and configure the inference server.
 Before building the client libraries and applications you must first
 install some prerequisites. The following instructions assume Ubuntu
 16.04. OpenCV is used by image\_client to preprocess images before
-sending them to the inference server for inferencing.
+sending them to the inference server for inferencing. The python-pil
+package is required by the Python image\_client example.
 
     sudo apt-get update
-    sudo apt-get install build-essential libcurl3-dev libopencv-dev libopencv-core-dev software-properties-common
+    sudo apt-get install build-essential libcurl3-dev libopencv-dev libopencv-core-dev python-pil software-properties-common
 
 Protobuf3 support is required. For Ubuntu 16.04 this must be installed
 from a ppa, but if you are using a more recent distribution this step
@@ -57,18 +58,20 @@ and example image\_client application can be built:
 Build artifacts are in build/.  The Python whl file is generated in
 build/dist/dist/ and can be installed with a command like the following:
 
-    pip install --no-cache-dir --upgrade build/dist/dist/inference_server-0.0.1-cp27-cp27mu-linux_x86_64.whl
+    pip install --no-cache-dir --upgrade build/dist/dist/inference_server-1.0.0-cp27-cp27mu-linux_x86_64.whl
 
 ## Image Classification Example
 
 The image classification example that uses the C++ client API is
 available at src/clients/image\_classification/image\_client.cc. After
-building, the executable is available at build/image\_client.
+building, the executable is available at build/image\_client. The
+python version of the image classification client is available at
+src/clients/python/image\_client.py.
 
-To use image\_client you must first have an inference server that is
-serving one or more image classification models. The image\_client
-example requires that the model have a single image input and produce
-a single classification output.
+To use image\_client (or image\_client.py) you must first have an
+inference server that is serving one or more image classification
+models. The image\_client example requires that the model have a
+single image input and produce a single classification output.
 
 A simple TensorRT MNIST model is provided in the examples/models
 directory that we can use to demonstrate image\_client. Following the
@@ -81,8 +84,8 @@ For example:
 
 Replace /path/to/dl-inference-server/examples/models with the
 corresponding path in your local clone of this repo. Once the server
-is running you can use image\_client to send inference requests to the
-server.
+is running you can use image\_client (or image\_client.py) to send
+inference requests to the server.
 
     image_client -m mnist_plan -s VGG examples/data/3.pgm
 

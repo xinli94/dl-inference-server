@@ -54,17 +54,26 @@ Preprocess(
   size_t img_channels, const cv::Size& img_size,
   const ScaleType scale, std::vector<uint8_t>* input_data)
 {
+  // Image channels are in BGR order. Currently model configuration
+  // data doesn't provide any information as to the expected channel
+  // orderings (like RGB, BGR). We are going to assume that RGB is the
+  // most likely ordering and so change the channels to that ordering.
+
   cv::Mat sample;
   if ((img.channels() == 3) && (img_channels == 1)) {
     cv::cvtColor(img, sample, CV_BGR2GRAY);
   } else if ((img.channels() == 4) && (img_channels == 1)) {
     cv::cvtColor(img, sample, CV_BGRA2GRAY);
+  } else if ((img.channels() == 3) && (img_channels == 3)) {
+    cv::cvtColor(img, sample, CV_BGR2RGB);
   } else if ((img.channels() == 4) && (img_channels == 3)) {
-    cv::cvtColor(img, sample, CV_BGRA2BGR);
+    cv::cvtColor(img, sample, CV_BGRA2RGB);
   } else if ((img.channels() == 1) && (img_channels == 3)) {
-    cv::cvtColor(img, sample, CV_GRAY2BGR);
+    cv::cvtColor(img, sample, CV_GRAY2RGB);
   } else {
-    sample = img;
+    std::cerr
+      << "unexpected number of channels in input image or model" << std::endl;
+    exit(1);
   }
 
   cv::Mat sample_resized;
@@ -80,10 +89,19 @@ Preprocess(
 
   cv::Mat sample_final;
   if (scale == ScaleType::INCEPTION) {
-    sample_final = sample_type.mul(cv::Scalar(1/128.0, 1/128.0, 1/128.0));
-    sample_final = sample_final - cv::Scalar(1.0, 1.0, 1.0);
+    if (img_channels == 1) {
+      sample_final = sample_type.mul(cv::Scalar(1/128.0));
+      sample_final = sample_final - cv::Scalar(1.0);
+    } else {
+      sample_final = sample_type.mul(cv::Scalar(1/128.0, 1/128.0, 1/128.0));
+      sample_final = sample_final - cv::Scalar(1.0, 1.0, 1.0);
+    }
   } else if (scale == ScaleType::VGG) {
-    sample_final = sample_type - cv::Scalar(104, 117, 123);
+    if (img_channels == 1) {
+      sample_final = sample_type - cv::Scalar(128);
+    } else {
+      sample_final = sample_type - cv::Scalar(104, 117, 123);
+    }
   } else {
     sample_final = sample_type;
   }
@@ -202,9 +220,9 @@ Postprocess(
 
   const std::unique_ptr<nic::InferContext::Result>& result = results[0];
 
-  // For each result in the batch count the top predication. Since we
+  // For each result in the batch count the top prediction. Since we
   // used that same image for every entry in the batch we expect the
-  // top predication to be the same for each entry... but this code
+  // top prediction to be the same for each entry... but this code
   // doesn't assume that.
   std::vector<std::pair<size_t, std::string>> predictions;
   for (size_t b = 0; b < batch_size; ++b) {
@@ -241,7 +259,7 @@ Postprocess(
       }
 
       // Keep going if printing all the returned class results,
-      // otherwise we've seen the top predication so go to the next
+      // otherwise we've seen the top prediction so go to the next
       // entry in the batch
       if (show_all) {
        std::cout
