@@ -5,11 +5,11 @@ optimized for NVIDIA GPUs. The server provides an inference service
 via an HTTP endpoint, allowing remote clients to request inferencing
 for any model being managed by the server.
 
-This repo contains a C++ and Python client libraries that make it easy
-to communicate with an inference server. Also included is
-*image\_client*, an example C++ application that uses the C++ client
-library to execute image classification models on the inference
-server.
+This repo contains C++ and Python client libraries that make it easy
+to communicate with the inference server. Also included are C++ and
+Python versions of *image\_client*, an example application that uses
+the C++ or Python client library to execute image classification
+models on the inference server.
 
 The inference server itself is delivered as a containerized solution
 from the [NVIDIA GPU
@@ -62,13 +62,15 @@ build/dist/dist/ and can be installed with a command like the following:
 ## Image Classification Example
 
 The image classification example that uses the C++ client API is
-available at src/clients/image\_classification/image\_client.cc. After
-building, the executable is available at build/image\_client.
+available at src/clients/c++/image\_client.cc. After building, the
+executable is available at build/image\_client. The python version of
+the image classification client is available at
+src/clients/python/image\_client.py.
 
-To use image\_client you must first have an inference server that is
-serving one or more image classification models. The image\_client
-example requires that the model have a single image input and produce
-a single classification output.
+To use image\_client (or image\_client.py) you must first have an
+inference server that is serving one or more image classification
+models. The image\_client example requires that the model have a
+single image input and produce a single classification output.
 
 A simple TensorRT MNIST model is provided in the examples/models
 directory that we can use to demonstrate image\_client. Following the
@@ -81,8 +83,8 @@ For example:
 
 Replace /path/to/dl-inference-server/examples/models with the
 corresponding path in your local clone of this repo. Once the server
-is running you can use image\_client to send inference requests to the
-server.
+is running you can use image\_client (or image\_client.py) to send
+inference requests to the server.
 
     image_client -m mnist_plan -s VGG examples/data/3.pgm
 
@@ -114,7 +116,7 @@ indicated by the 'cnt' value).
 
 The C++ client API exposes a class-based interface for querying server
 and model status and for performing inference. The commented interface
-is available at src/clients/common/request.h.
+is available at src/clients/c++/request.h.
 
 The following shows an example of the basic steps required for
 inferencing (error checking not included to improve clarity, see

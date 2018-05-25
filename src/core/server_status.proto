@@ -57,8 +57,20 @@ message InferRequestStats {
   StatDuration run_wait = 4;
 }
 
+// Server readiness states.
+enum ModelReadyState {
+  MODEL_UNKNOWN = 0;
+  MODEL_READY = 1;
+  MODEL_UNAVAILABLE = 2;
+  MODEL_LOADING = 3;
+  MODEL_UNLOADING = 4;
+}
+
 // Status for a version of a model.
 message ModelVersionStatus {
+  // Current readiness state for the model version.
+  ModelReadyState ready_state = 1;
+
   // Duration statistics for each batch size used for this version of
   // the model.
   map<uint32, InferRequestStats> infer_stats = 2;
@@ -73,6 +85,16 @@ message ModelStatus {
   map<uint32, ModelVersionStatus> version_status = 2;
 }
 
+// Server readiness states.
+enum ServerReadyState {
+  SERVER_INVALID = 0;
+  SERVER_INITIALIZING = 1;
+  SERVER_READY = 2;
+  SERVER_EXITING = 3;
+
+  SERVER_FAILED_TO_INITIALIZE = 10;
+}
+
 // Status for inference server
 message ServerStatus {
   // Server ID.
@@ -80,6 +102,9 @@ message ServerStatus {
 
   // Server version.
   string version = 2;
+
+  // Current readiness state for the server.
+  ServerReadyState ready_state = 7;
 
   // Server uptime in nanoseconds
   uint64 uptime_ns = 3;

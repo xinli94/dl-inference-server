@@ -39,10 +39,13 @@ constexpr char kProfileRESTEndpoint[] = "api/profile";
 constexpr char kTensorFlowGraphDefPlatform[] = "tensorflow_graphdef";
 constexpr char kTensorFlowSavedModelPlatform[] = "tensorflow_saved_model";
 constexpr char kTensorRTPLANPlatform[] = "tensorrt_plan";
+constexpr char kCaffe2NetDefPlatform[] = "caffe2_netdef";
 
 constexpr char kModelConfigPbTxt[] = "config.pbtxt";
 constexpr char kTensorRTPlanFilename[] = "model.plan";
 constexpr char kTensorFlowGraphDefFilename[] = "model.graphdef";
+constexpr char kCaffe2NetDefFilename[] = "model.netdef";
+constexpr char kCaffe2NetDefInitFilenamePrefix[] = "init_";
 
 constexpr uint64_t NANOS_PER_SECOND = 1000000000;
 

@@ -32,7 +32,7 @@
 #include "src/core/api.pb.h"
 #include "src/core/model_config.pb.h"
 #include "src/core/model_config.h"
-#include "src/core/status.pb.h"
+#include "src/core/request_status.pb.h"
 #include "src/core/server_status.pb.h"
 
 namespace nvidia { namespace inferenceserver { namespace client {
