@@ -28,6 +28,7 @@ from builtins import range
 from future.utils import iteritems
 from ctypes import *
 import numpy as np
+from numpy.ctypeslib import ndpointer
 import pkg_resources
 import inference_server.api.model_config_pb2
 from inference_server.api.server_status_pb2 import ServerStatus
@@ -119,6 +120,11 @@ _crequest_infer_ctx_result_modelver.argtypes = [c_void_p, POINTER(c_uint32)]
 _crequest_infer_ctx_result_dtype = _crequest.InferContextResultDataType
 _crequest_infer_ctx_result_dtype.restype = c_void_p
 _crequest_infer_ctx_result_dtype.argtypes = [c_void_p, POINTER(c_uint32)]
+_crequest_infer_ctx_result_dims = _crequest.InferContextResultDims
+_crequest_infer_ctx_result_dims.restype = c_void_p
+_crequest_infer_ctx_result_dims.argtypes = [c_void_p, c_uint64,
+                                            ndpointer(c_uint32, flags="C_CONTIGUOUS"),
+                                            POINTER(c_uint64)]
 _crequest_infer_ctx_result_next_raw = _crequest.InferContextResultNextRaw
 _crequest_infer_ctx_result_next_raw.restype = c_void_p
 _crequest_infer_ctx_result_next_raw.argtypes = [c_void_p, c_uint64, POINTER(c_char_p),
@@ -468,6 +474,8 @@ class InferContext:
                 results[output_name] = list()
                 if output_format == InferContext.ResultFormat.RAW:
                     for b in range(batch_size):
+                        # Get the result value into a 1-dim np array
+                        # of the appropriate type
                         cval = c_char_p()
                         cval_len = c_uint64()
                         _raise_if_error(
@@ -475,7 +483,19 @@ class InferContext:
                                 _crequest_infer_ctx_result_next_raw(
                                     result, b, byref(cval), byref(cval_len))))
                         val_buf = cast(cval, POINTER(c_byte * cval_len.value))[0]
-                        results[output_name].append(np.copy(np.frombuffer(val_buf, dtype=result_dtype)))
+                        val = np.frombuffer(val_buf, dtype=result_dtype)
+                        # Reshape the result to the appropriate shape
+                        max_shape_dims = 16
+                        shape = np.zeros(max_shape_dims, dtype=np.uint32)
+                        shape_len = c_uint64()
+                        _raise_if_error(
+                            c_void_p(
+                                _crequest_infer_ctx_result_dims(
+                                    result, c_uint64(max_shape_dims),
+                                    shape, byref(shape_len))))
+                        shaped = np.reshape(np.copy(val), np.resize(shape, shape_len.value).tolist())
+                        results[output_name].append(shaped)
+
                 elif isinstance(output_format, tuple) and (output_format[0] == InferContext.ResultFormat.CLASS):
                     for b in range(batch_size):
                         classes = list()
