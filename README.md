@@ -15,8 +15,14 @@ The inference server itself is delivered as a containerized solution
 from the [NVIDIA GPU
 Cloud](https://www.nvidia.com/en-us/gpu-cloud/). See the [Inference
 Container User
-Guide](https://docs.nvidia.com/deeplearning/dgx/inference-user-guide/index.html)
+Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html)
 for information on how to install and configure the inference server.
+
+Use [Issues](https://github.com/NVIDIA/dl-inference-server/issues) to
+report any issues or questions about the client libraries and
+examples. A [DevTalk
+forum](https://devtalk.nvidia.com/default/board/262/container-attis-inference-server)
+is also available for Inference Server issues and questions.
 
 ## Branches
 
@@ -76,7 +82,7 @@ single image input and produce a single classification output.
 A simple TensorRT MNIST model is provided in the examples/models
 directory that we can use to demonstrate image\_client. Following the
 instructions in the [Inference Container User
-Guide](https://docs.nvidia.com/deeplearning/dgx/inference-user-guide/index.html),
+Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html),
 launch the inference server container pointing to that model store.
 For example:
 
