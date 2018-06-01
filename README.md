@@ -15,8 +15,14 @@ The inference server itself is delivered as a containerized solution
 from the [NVIDIA GPU
 Cloud](https://www.nvidia.com/en-us/gpu-cloud/). See the [Inference
 Container User
-Guide](https://docs.nvidia.com/deeplearning/dgx/inference-user-guide/index.html)
+Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html)
 for information on how to install and configure the inference server.
+
+Use [Issues](https://github.com/NVIDIA/dl-inference-server/issues) to
+report any issues or questions about the client libraries and
+examples. A [DevTalk
+forum](https://devtalk.nvidia.com/default/board/262/container-attis-inference-server)
+is also available for Inference Server issues and questions.
 
 ## Branches
 
@@ -32,10 +38,11 @@ for information on how to install and configure the inference server.
 Before building the client libraries and applications you must first
 install some prerequisites. The following instructions assume Ubuntu
 16.04. OpenCV is used by image\_client to preprocess images before
-sending them to the inference server for inferencing.
+sending them to the inference server for inferencing. The python-pil
+package is required by the Python image\_client example.
 
     sudo apt-get update
-    sudo apt-get install build-essential libcurl3-dev libopencv-dev libopencv-core-dev software-properties-common
+    sudo apt-get install build-essential libcurl3-dev libopencv-dev libopencv-core-dev python-pil software-properties-common
 
 Protobuf3 support is required. For Ubuntu 16.04 this must be installed
 from a ppa, but if you are using a more recent distribution this step
@@ -57,7 +64,7 @@ and example image\_client application can be built:
 Build artifacts are in build/.  The Python whl file is generated in
 build/dist/dist/ and can be installed with a command like the following:
 
-    pip install --no-cache-dir --upgrade build/dist/dist/inference_server-0.0.1-cp27-cp27mu-linux_x86_64.whl
+    pip install --no-cache-dir --upgrade build/dist/dist/inference_server-1.1.0-cp27-cp27mu-linux_x86_64.whl
 
 ## Image Classification Example
 
@@ -75,7 +82,7 @@ single image input and produce a single classification output.
 A simple TensorRT MNIST model is provided in the examples/models
 directory that we can use to demonstrate image\_client. Following the
 instructions in the [Inference Container User
-Guide](https://docs.nvidia.com/deeplearning/dgx/inference-user-guide/index.html),
+Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html),
 launch the inference server container pointing to that model store.
 For example:
 
