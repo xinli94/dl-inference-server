@@ -425,7 +425,11 @@ class InferContext:
         finally:
             _crequest_infer_ctx_options_del(options)
 
-        # Set the input values
+        # Set the input values. The input values must be contiguous
+        # and the lifetime of those contiguous copies must span until
+        # the inference completes so use grab a reference to them at
+        # this scope.
+        contiguous_input_values = list()
         for (input_name, input_values) in iteritems(inputs):
             input = c_void_p()
             try:
@@ -435,6 +439,7 @@ class InferContext:
                 for input_value in input_values:
                     if not input_value.flags['C_CONTIGUOUS']:
                         input_value = np.ascontiguousarray(input_value)
+                    contiguous_input_values.append(input_value)
                     _raise_if_error(
                         c_void_p(
                             _crequest_infer_ctx_input_set_raw(
