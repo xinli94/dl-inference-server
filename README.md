@@ -1,7 +1,7 @@
-# Deep Learning Inference Server Clients
+# ATTIS Inference Server Clients
 
-The NVIDIA Inference Server provides a cloud inferencing solution
-optimized for NVIDIA GPUs. The server provides an inference service
+The ATTIS Inference Server provides a cloud inferencing solution
+optimized for NVIDIA GPUs. ATTIS provides deep-learning inferencing
 via an HTTP endpoint, allowing remote clients to request inferencing
 for any model being managed by the server.
 
@@ -11,68 +11,76 @@ Python versions of *image\_client*, an example application that uses
 the C++ or Python client library to execute image classification
 models on the inference server.
 
-The inference server itself is delivered as a containerized solution
-from the [NVIDIA GPU
-Cloud](https://www.nvidia.com/en-us/gpu-cloud/). See the [Inference
-Container User
-Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html)
-for information on how to install and configure the inference server.
+The ATTIS Inference Server itself is delivered as a containerized
+solution on the
+[NVIDIA GPU Cloud](https://www.nvidia.com/en-us/gpu-cloud/). See the
+[ATTIS Container User Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html)
+for information on how to install and configure ATTIS.
 
 Use [Issues](https://github.com/NVIDIA/dl-inference-server/issues) to
 report any issues or questions about the client libraries and
-examples. A [DevTalk
-forum](https://devtalk.nvidia.com/default/board/262/container-attis-inference-server)
-is also available for Inference Server issues and questions.
+examples. A
+[DevTalk forum](https://devtalk.nvidia.com/default/board/262/container-attis-inference-server)
+is also available for ATTIS Inference Server issues and questions.
 
 ## Branches
 
-**master**: Active development branch. Typically will be compatible with
- the currently released NVIDIA Inference Server container, but not
+**master**: Active development branch. Typically will be compatible
+ with the currently released ATTIS Inference Server container, but not
  guaranteed.
 
-**yy.mm**: Branch compatible with NVIDIA Inference Server yy.mm, for
+**yy.mm**: Branch compatible with ATTIS Inference Server yy.mm, for
   example 18.05.
 
 ## Building the Clients
 
-Before building the client libraries and applications you must first
-install some prerequisites. The following instructions assume Ubuntu
-16.04. OpenCV is used by image\_client to preprocess images before
-sending them to the inference server for inferencing. The python-pil
-package is required by the Python image\_client example.
+A Dockerfile is provided for building the client libraries and
+examples. Instead of building with docker you can instead follow the
+build steps outlined in the Dockerfile on your host system. The build
+assumes a Ubuntu 16.04 system and so may require modification for
+other distributions.
+
+Before building, edit the Dockerfile to set PYVER to either 2.7 or 3.5
+to select the version of Python that you will be using. The following
+will build the C++ client library, C++ examples and create a Python
+wheel file for the Python client library.
+
+    docker build -t attis_clients .
+
+The easiest way to extract the built libraries and examples from the
+docker image is to mount a host driver into the container and then
+copy the images.
+
+    docker run --rm -it -v /tmp:/tmp/host attis_clients
+    # cp build/image_client /tmp/host/.
+    # cp build/perf_client /tmp/host/.
+    # cp build/dist/dist/inference_server-*.whl /tmp/host/.
+
+You can now access image\_client and perf\_client from /tmp on the
+host system. Before running the C++ examples on the host the
+appropriate dependencies must be installed. OpenCV is used by the C++
+image\_client example to preprocess images before sending them to the
+inference server for inferencing. For example, for Ubuntu 16.04:
 
     sudo apt-get update
-    sudo apt-get install build-essential libcurl3-dev libopencv-dev libopencv-core-dev python-pil software-properties-common
+    sudo apt-get install libcurl3-dev libopencv-dev libopencv-core-dev
 
-Protobuf3 support is required. For Ubuntu 16.04 this must be installed
-from a ppa, but if you are using a more recent distribution this step
-might not be necessary.
+The Python whl file can be installed using pip:
 
-    sudo add-apt-repository ppa:maarten-fonville/protobuf
-    sudo apt-get update
-    sudo apt-get install protobuf-compiler libprotobuf-dev
+    pip install --no-cache-dir --upgrade /tmp/inference_server-1.1.0-cp27-cp27mu-linux_x86_64.whl
 
-Creating the whl file for the Python client library requires setuptools.
+The Python image\_client example requires Pillow for image processing
+so install that package before running.
 
-    pip install --no-cache-dir --upgrade setuptools
-
-With those prerequisites installed, the C++ and Python client libraries
-and example image\_client application can be built:
-
-    make -f Makefile.clients all pip
-
-Build artifacts are in build/.  The Python whl file is generated in
-build/dist/dist/ and can be installed with a command like the following:
-
-    pip install --no-cache-dir --upgrade build/dist/dist/inference_server-1.1.0-cp27-cp27mu-linux_x86_64.whl
+    pip install --no-cache-dir --upgrade pillow
 
 ## Image Classification Example
 
 The image classification example that uses the C++ client API is
-available at src/clients/c++/image\_client.cc. After building, the
-executable is available at build/image\_client. The python version of
-the image classification client is available at
-src/clients/python/image\_client.py.
+available at src/clients/c++/image\_client.cc. After building as
+described above, the executable is available at
+build/image\_client. The python version of the image classification
+client is available at src/clients/python/image\_client.py.
 
 To use image\_client (or image\_client.py) you must first have an
 inference server that is serving one or more image classification
@@ -81,10 +89,9 @@ single image input and produce a single classification output.
 
 A simple TensorRT MNIST model is provided in the examples/models
 directory that we can use to demonstrate image\_client. Following the
-instructions in the [Inference Container User
-Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html),
-launch the inference server container pointing to that model store.
-For example:
+instructions in the
+[ATTIS Container User Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html),
+launch the ATTIS container pointing to that model store.  For example:
 
     nvidia-docker run --rm --shm-size=1g --ulimit memlock=-1 --ulimit stack=67108864 -p8000:8000 --mount type=bind,source=/path/to/dl-inference-server/examples/models,target=/tmp/models nvcr.io/nvidia/inferenceserver:18.05 /opt/inference_server/bin/inference_server --model-store=/tmp/models
 

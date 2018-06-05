@@ -30,6 +30,8 @@ from setuptools import setup, dist
 VERSION = '1.1.0'
 
 REQUIRED = [
+    'future',
+    'numpy',
     'protobuf>=3.5.0',
 ]
 
