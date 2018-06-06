@@ -303,14 +303,13 @@ Usage(char** argv, const std::string& msg = std::string())
   std::cerr << "\t-t <thread count>" << std::endl;
   std::cerr << "\t-w <warmup passes>" << std::endl;
   std::cerr << "\t-p <measurement passes>" << std::endl;
-  std::cerr << "\t-w <passes>" << std::endl;
   std::cerr << "\t-n" << std::endl;
   std::cerr << "\t-m <model name>" << std::endl;
   std::cerr << "\t-x <model version>" << std::endl;
   std::cerr << "\t-u <URL for inference service>" << std::endl;
   std::cerr << std::endl;
   std::cerr
-    << "-n flag enables profiling for the duration of the run" << std::endl;
+    << "The -n flag enables profiling for the duration of the run" << std::endl;
   std::cerr
     << "If -x is not specified the most recent version (that is, the highest "
     << "numbered version) of the model will be used." << std::endl;
