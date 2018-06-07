@@ -171,8 +171,7 @@ path in your local clone of this repo.
 You can use the --help flag to see all perf\_client command-line
 options. You vary thread count (-t) to control concurrency. Use
 warmup-passes (-w) to avoid start-up overhead and measurement-passes
-(-p) to control the length of the run. You can adjust -p to get "long
-enough" runs to get reliable results. For example,
+(-p) to control the length of the run. For example,
 
     $ build/perf_client -m resnet50_netdef -t4 -w5 -p100
     *** Warming up ***
@@ -201,7 +200,7 @@ other 8724 usecs was the actual time to execute the model.
 By increasing concurrency (-t) and batch size (-b) we can trade off
 higher throughput for increased per-inference latency. For example,
 
-    $ build/perf_client -m resnet50_netdef -t4 -w5 -p100
+    $ build/perf_client -m resnet50_netdef -t16 -b64 -w5 -p100
     *** Warming up ***
     *** Begin ***
     *** End ***
