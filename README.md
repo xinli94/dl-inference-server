@@ -65,11 +65,18 @@ copy the images.
 
 You can now access image\_client and perf\_client from /tmp on the
 host system. Before running the C++ examples on the host the
-appropriate dependencies must be installed. OpenCV is used by the C++
-image\_client example to preprocess images before sending them to the
-inference server for inferencing. For example, for Ubuntu 16.04:
+appropriate dependencies must be installed. Protobuf3 support is
+required. For Ubuntu 16.04 this must be installed from a ppa, but if
+you are using a more recent distribution this step might not be
+necessary.
 
+    $ sudo add-apt-repository ppa:maarten-fonville/protobuf
     $ sudo apt-get update
+    $ sudo apt-get install libprotobuf-dev
+
+OpenCV is used by the C++ image\_client example to preprocess images
+before sending them to the inference server for inferencing.
+
     $ sudo apt-get install libcurl3-dev libopencv-dev libopencv-core-dev
 
 The Python whl file can be installed using pip:
