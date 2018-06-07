@@ -114,7 +114,7 @@ Following the instructions in the
 [ATTIS Container User Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html),
 launch the ATTIS container pointing to that model store. For example:
 
-    $ nvidia-docker run --rm -p8000:8000 -v/path/to/dl-inference-server/examples/models:/models nvcr.io/nvidia/inferenceserver:18.06 /opt/inference_server/bin/inference_server --model-store=/models
+    $ nvidia-docker run --rm -p8000:8000 -v/path/to/dl-inference-server/examples/models:/models nvcr.io/nvidia/inferenceserver:18.06 inference_server --model-store=/models
 
 Make sure you choose the most recent version of
 nvcr.io/nvidia/inferenceserver. Replace
@@ -168,7 +168,7 @@ Following the instructions in the
 [ATTIS Container User Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html),
 launch the ATTIS container pointing to that model store. For example:
 
-    $ nvidia-docker run --rm -p8000:8000 -v/path/to/dl-inference-server/examples/models:/models nvcr.io/nvidia/inferenceserver:18.06 /opt/inference_server/bin/inference_server --model-store=/models
+    $ nvidia-docker run --rm -p8000:8000 -v/path/to/dl-inference-server/examples/models:/models nvcr.io/nvidia/inferenceserver:18.06 inference_server --model-store=/models
 
 Make sure you choose the most recent version of
 nvcr.io/nvidia/inferenceserver. Replace
