@@ -1,43 +1,45 @@
-# ATTIS Inference Server Clients
+# NVIDIA Inference Server Clients
 
-The ATTIS Inference Server provides a cloud inferencing solution
-optimized for NVIDIA GPUs. ATTIS provides deep-learning inferencing
-via an HTTP endpoint, allowing remote clients to request inferencing
-for any model being managed by the server.
+The NVIDIA Inference Server provides a cloud inferencing solution
+optimized for NVIDIA GPUs. The inference server provides deep-learning
+inferencing via an HTTP endpoint, allowing remote clients to request
+inferencing for any model being managed by the server.
 
 This repo contains C++ and Python client libraries that make it easy
 to communicate with the inference server. Also included are a couple
 of example applications.
 
 - C++ and Python versions of *image\_client*, an example application
-that uses the C++ or Python client library to execute image
-classification models on the inference server.
+  that uses the C++ or Python client library to execute image
+  classification models on the inference server.
 
 - C++ version of *perf\_client*, an example application that issues a
-  large number of concurrent requests to ATTIS to measure latency and
-  throughput for a given model. You can use this to experiment with
-  different model configuration settings for your models.
+  large number of concurrent requests to the inference server to
+  measure latency and throughput for a given model. You can use this
+  to experiment with different model configuration settings for your
+  models.
 
-The ATTIS Inference Server itself is delivered as a containerized
-solution on the
-[NVIDIA GPU Cloud](https://www.nvidia.com/en-us/gpu-cloud/). See the
-[ATTIS Container User Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html)
-for information on how to install and configure ATTIS.
+The inference server itself is delivered as a containerized solution
+on the [NVIDIA GPU
+Cloud](https://www.nvidia.com/en-us/gpu-cloud/). See the [Inference
+Server User
+Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html)
+for information on how to install and configure the inference server.
 
 Use [Issues](https://github.com/NVIDIA/dl-inference-server/issues) to
 report any issues or questions about the client libraries and
-examples. A
-[DevTalk forum](https://devtalk.nvidia.com/default/board/262/container-attis-inference-server)
-is also available for ATTIS Inference Server issues and questions.
+examples. A [DevTalk
+forum](https://devtalk.nvidia.com/default/board/262/container-inference-server)
+is also available for inference server issues and questions.
 
 ## Branches
 
 **master**: Active development branch. Typically will be compatible
- with the currently released ATTIS Inference Server container, but not
+ with the currently released Inference Server container, but not
  guaranteed.
 
-**yy.mm**: Branch compatible with ATTIS Inference Server yy.mm, for
-  example 18.06.
+**yy.mm**: Branch compatible with Inference Server yy.mm, for
+  example *18.06*.
 
 ## Building the Clients
 
@@ -52,13 +54,13 @@ to select the version of Python that you will be using. The following
 will build the C++ client library, C++ examples and create a Python
 wheel file for the Python client library.
 
-    $ docker build -t attis_clients .
+    $ docker build -t inference_server_clients .
 
 The easiest way to extract the built libraries and examples from the
 docker image is to mount a host driver into the container and then
 copy the images.
 
-    $ docker run --rm -it -v /tmp:/tmp/host attis_clients
+    $ docker run --rm -it -v /tmp:/tmp/host inference_server_clients
     # cp build/image_client /tmp/host/.
     # cp build/perf_client /tmp/host/.
     # cp build/dist/dist/inference_server-*.whl /tmp/host/.
@@ -110,9 +112,10 @@ zoos.
     $ cd examples
     $ ./fetch_models.sh
 
-Following the instructions in the
-[ATTIS Container User Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html),
-launch the ATTIS container pointing to that model store. For example:
+Following the instructions in the [Inference Server User
+Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html),
+launch the inference server container pointing to that model
+store. For example:
 
     $ nvidia-docker run --rm -p8000:8000 -v/path/to/dl-inference-server/examples/models:/models nvcr.io/nvidia/inferenceserver:18.06 inference_server --model-store=/models
 
@@ -152,8 +155,8 @@ indicated by the 'cnt' value).
 ## Perf Example
 
 The perf\_client example uses the C++ client API to send concurrent
-requests to ATTIS. After building as described above, the executable
-is available at build/perf\_client.
+requests to the inference server. After building as described above,
+the executable is available at build/perf\_client.
 
 You can use perf\_client with any kind of model. It sends random data
 as input and ignores the output. Any model in the example model store
@@ -164,9 +167,10 @@ their public model zoos.
     $ cd examples
     $ ./fetch_models.sh
 
-Following the instructions in the
-[ATTIS Container User Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html),
-launch the ATTIS container pointing to that model store. For example:
+Following the instructions in the [Inference Server User
+Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html),
+launch the inference server container pointing to that model
+store. For example:
 
     $ nvidia-docker run --rm -p8000:8000 -v/path/to/dl-inference-server/examples/models:/models nvcr.io/nvidia/inferenceserver:18.06 inference_server --model-store=/models
 
