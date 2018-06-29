@@ -1,0 +1,103 @@
+// Copyright (c) 2018, NVIDIA CORPORATION. All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions
+// are met:
+//  * Redistributions of source code must retain the above copyright
+//    notice, this list of conditions and the following disclaimer.
+//  * Redistributions in binary form must reproduce the above copyright
+//    notice, this list of conditions and the following disclaimer in the
+//    documentation and/or other materials provided with the distribution.
+//  * Neither the name of NVIDIA CORPORATION nor the names of its
+//    contributors may be used to endorse or promote products derived
+//    from this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY
+// EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+// PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR
+// CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+// EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+// PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+// PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
+// OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+syntax = "proto3";
+
+package nvidia.inferenceserver;
+
+import "src/core/api.proto";
+import "src/core/request_status.proto";
+import "src/core/server_status.proto";
+
+service GRPCService {
+  rpc Status(StatusRequest) returns (StatusResponse) {}
+  rpc Profile(ProfileRequest) returns (ProfileResponse) {}
+  // For infer, there are two approaches, should test and decide which one to use:
+  // 1. Transmit large data via gRPC is chunking them (~ 1 MB, can be tuned)
+  //    and send it in the form of "stream"
+  // https://github.com/glycerine/grpc-demo/blob/master/streambigfile/sbf.proto#L27
+  // https://ops.tips/blog/sending-files-via-grpc/
+  rpc InferStream(stream InferRequestStream) returns (stream InferResponseStream) {}
+  // 2. Set the maximum message size (default 4 MB) and transmit in one pass
+  // Seems like Tensorflow uses this approach to transfer tensor which can be large
+  // https://github.com/grpc/grpc/issues/8975
+  rpc Infer(InferRequest) returns (InferResponse) {}
+}
+
+// Request message for server status.
+message StatusRequest {
+  // The specific model status to be returned. Return all models if empty.
+  string model_name = 1;
+}
+
+message StatusResponse {
+  RequestStatus request_status = 1;
+  ServerStatus server_status = 2;
+}
+
+message ProfileRequest {
+  string cmd = 1;
+}
+
+message ProfileResponse{
+  RequestStatus request_status = 1;
+}
+
+message InferRequestStream {
+  oneof content {
+    InferRequestHeader request_header = 1;
+    bytes raw_input = 2;
+  }
+}
+
+message InferResponseStream {
+  message InferResponseStreamHeader {
+    RequestStatus request_status = 1;
+    InferResponseHeader meta_data = 2;
+  }
+  
+  oneof content {
+    InferResponseStreamHeader response_header = 1;
+    bytes raw_output = 2;
+  }
+}
+
+message InferRequest {
+  string model_name = 1;
+  // optional, use string here because the default value of int is 0.
+  // If the version field is missing,
+  // Golang will fill the field with its default value
+  // and then the server will select model version 0 in this case.
+  string version = 2;
+  InferRequestHeader meta_data = 3;
+  repeated bytes raw_input = 4;
+}
+
+message InferResponse {
+  RequestStatus request_status = 1;
+  InferResponseHeader meta_data = 2;
+  repeated bytes raw_output = 3;
+}

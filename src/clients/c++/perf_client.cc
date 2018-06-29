@@ -51,11 +51,43 @@ SignalHandler(int signum)
   early_exit = true;
 }
 
+enum ProtocolType {
+  HTTP = 0,
+  GRPC = 1
+};
+
+ProtocolType
+ParseProtocol(const std::string& str)
+{
+  std::string protocol(str);
+  std::transform(
+    protocol.begin(), protocol.end(), protocol.begin(), ::tolower);
+  if (protocol == "http") {
+    return ProtocolType::HTTP;
+  } else if (protocol == "grpc") {
+    return ProtocolType::GRPC;
+  }
+
+  std::cerr
+    << "unexpected protocol type \"" << str
+    << "\", expecting HTTP or gRPC" << std::endl;
+  exit(1);
+
+  return ProtocolType::HTTP;
+}
+
 nic::Error
-StartProfile(const std::string& url, const bool verbose = false)
+StartProfile(
+  const std::string& url, const ProtocolType protocol,
+  const bool verbose = false)
 {
   std::unique_ptr<nic::ProfileContext> ctx;
-  nic::Error err = nic::ProfileContext::Create(&ctx, url, verbose);
+  nic::Error err;
+  if (protocol == ProtocolType::HTTP) {
+    err = nic::ProfileHttpContext::Create(&ctx, url, verbose);
+  } else {
+    err = nic::ProfileGrpcContext::Create(&ctx, url, verbose);
+  }
   if (!err.IsOk()) {
     return err;
   }
@@ -64,10 +96,17 @@ StartProfile(const std::string& url, const bool verbose = false)
 }
 
 nic::Error
-StopProfile(const std::string& url, const bool verbose = false)
+StopProfile(
+  const std::string& url, const ProtocolType protocol,
+  const bool verbose = false)
 {
   std::unique_ptr<nic::ProfileContext> ctx;
-  nic::Error err = nic::ProfileContext::Create(&ctx, url, verbose);
+   nic::Error err;
+  if (protocol == ProtocolType::HTTP) {
+    err = nic::ProfileHttpContext::Create(&ctx, url, verbose);
+  } else {
+    err = nic::ProfileGrpcContext::Create(&ctx, url, verbose);
+  }
   if (!err.IsOk()) {
     return err;
   }
@@ -78,11 +117,18 @@ StopProfile(const std::string& url, const bool verbose = false)
 nic::Error
 GetModelStatus(
   ni::ModelStatus* model_status, const std::string& url,
+  const ProtocolType protocol,
   const std::string& model_name, const bool verbose = false)
 {
   std::unique_ptr<nic::ServerStatusContext> ctx;
-  nic::Error err =
-    nic::ServerStatusContext::Create(&ctx, url, model_name, verbose);
+  nic::Error err;
+  if (protocol == ProtocolType::HTTP) {
+    err = nic::ServerStatusHttpContext::Create(
+      &ctx, url, model_name, verbose);
+  } else {
+    err = nic::ServerStatusGrpcContext::Create(
+      &ctx, url, model_name, verbose);
+  }
   if (err.IsOk()) {
     ni::ServerStatus server_status;
     err = ctx->GetServerStatus(&server_status);
@@ -207,13 +253,19 @@ Report(
 void
 Infer(
   std::shared_ptr<nic::Error> err, const std::string& url,
+  const ProtocolType protocol,
   const std::string& model_name, const int model_version,
   const size_t pass_cnt, const size_t batch_size, const bool verbose = false)
 {
   // Create the context for inference of the specified model.
   std::unique_ptr<nic::InferContext> ctx;
-  *err =
-    nic::InferContext::Create(&ctx, url, model_name, model_version, verbose);
+  if (protocol == ProtocolType::HTTP) {
+    *err = nic::InferHttpContext::Create(
+      &ctx, url, model_name, model_version, verbose);
+  } else {
+    *err = nic::InferGrpcContext::Create(
+      &ctx, url, model_name, model_version, verbose);
+  }
   if (!err->IsOk()) {
     return;
   }
@@ -307,12 +359,17 @@ Usage(char** argv, const std::string& msg = std::string())
   std::cerr << "\t-m <model name>" << std::endl;
   std::cerr << "\t-x <model version>" << std::endl;
   std::cerr << "\t-u <URL for inference service>" << std::endl;
+  std::cerr << "\t-i <Protocol used to communicate with inference service>"
+    << std::endl;
   std::cerr << std::endl;
   std::cerr
     << "The -n flag enables profiling for the duration of the run" << std::endl;
   std::cerr
     << "If -x is not specified the most recent version (that is, the highest "
     << "numbered version) of the model will be used." << std::endl;
+  std::cerr
+    << "For -i, available protocols are gRPC and HTTP. Default is HTTP."
+    << std::endl;
 
   exit(1);
 }
@@ -331,10 +388,11 @@ main(int argc, char** argv)
   std::string model_name;
   int model_version = -1;
   std::string url("localhost:8000");
+  ProtocolType protocol = ProtocolType::HTTP;
 
   // Parse commandline...
   int opt;
-  while ((opt = getopt(argc, argv, "vnu:m:x:b:t:p:w:")) != -1) {
+  while ((opt = getopt(argc, argv, "vnu:m:x:b:t:p:w:i:")) != -1) {
     switch (opt) {
       case 'v':
         verbose = true;
@@ -363,6 +421,9 @@ main(int argc, char** argv)
       case 'w':
         warmup_pass_cnt = atoi(optarg);
         break;
+      case 'i':
+        protocol = ParseProtocol(optarg);
+        break;
       case '?':
         Usage(argv);
         break;
@@ -384,7 +445,8 @@ main(int argc, char** argv)
     std::shared_ptr<nic::Error> warmup_status =
       std::make_shared<nic::Error>(ni::RequestStatusCode::SUCCESS);
     Infer(
-      warmup_status, url, model_name, model_version, warmup_pass_cnt, batch_size, verbose);
+      warmup_status, url, protocol, model_name, model_version,
+      warmup_pass_cnt, batch_size, verbose);
     if (!warmup_status->IsOk()) {
       std::cerr << "warmup failed: " << *warmup_status << std::endl;
       exit(1);
@@ -393,7 +455,8 @@ main(int argc, char** argv)
 
   // Get server status before running inferences.
   ni::ModelStatus start_status;
-  nic::Error err = GetModelStatus(&start_status, url, model_name, verbose);
+  nic::Error err = GetModelStatus(
+    &start_status, url, protocol, model_name, verbose);
   if (!err.IsOk()) {
     std::cerr << err << std::endl;
     exit(1);
@@ -401,7 +464,7 @@ main(int argc, char** argv)
 
   // Start profiling on the server if requested.
   if (profile) {
-    err = StartProfile(url, verbose);
+    err = StartProfile(url, protocol, verbose);
     if (!err.IsOk()) {
       std::cerr << err << std::endl;
       exit(1);
@@ -419,7 +482,7 @@ main(int argc, char** argv)
   for (int i = 0; i < thread_cnt; ++i) {
     threads_status.emplace_back(new nic::Error(ni::RequestStatusCode::SUCCESS));
     threads.emplace_back(
-      Infer, threads_status.back(), url, model_name, model_version,
+      Infer, threads_status.back(), url, protocol, model_name, model_version,
       pass_cnt, batch_size, verbose);
   }
 
@@ -442,7 +505,7 @@ main(int argc, char** argv)
 
   // Stop profiling on the server if requested.
   if (profile) {
-    err = StopProfile(url, verbose);
+    err = StopProfile(url, protocol, verbose);
     if (!err.IsOk()) {
       std::cerr << err << std::endl;
       exit(1);
@@ -452,7 +515,7 @@ main(int argc, char** argv)
   // Get server status and then print report on difference between
   // before and after status.
   ni::ModelStatus end_status;
-  err = GetModelStatus(&end_status, url, model_name, verbose);
+  err = GetModelStatus(&end_status, url, protocol, model_name, verbose);
   if (!err.IsOk()) {
     std::cerr << err << std::endl;
     exit(1);

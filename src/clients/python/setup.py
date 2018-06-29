@@ -27,7 +27,7 @@
 from setuptools import find_packages
 from setuptools import setup, dist
 
-VERSION = '1.1.0'
+VERSION = '0.4.0'
 
 REQUIRED = [
     'future',

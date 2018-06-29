@@ -69,6 +69,30 @@ ErrorRequestId(nic::Error* ctx)
 }
 
 //==============================================================================
+namespace {
+  
+enum ProtocolType {
+  HTTP = 0,
+  GRPC = 1
+};
+
+nic::Error
+ParseProtocol(ProtocolType* protocol, const int protocol_int)
+{
+  if (protocol_int == 0) {
+    *protocol = ProtocolType::HTTP;
+    return nic::Error::Success;
+  } else if (protocol_int == 1) {
+    *protocol = ProtocolType::GRPC;
+    return nic::Error::Success;
+  }
+  return nic::Error(ni::RequestStatusCode::INVALID_ARG,
+    "unexpected protocol integer, expecting 0 for HTTP or 1 for gRPC");
+}
+
+} // namespace
+
+//==============================================================================
 struct ServerStatusContextCtx {
   std::unique_ptr<nic::ServerStatusContext> ctx;
   std::string status_buf;
@@ -76,24 +100,40 @@ struct ServerStatusContextCtx {
 
 nic::Error*
 ServerStatusContextNew(
-  ServerStatusContextCtx** ctx, const char* url,
+  ServerStatusContextCtx** ctx, const char* url, int protocol_int,
   const char* model_name, bool verbose)
 {
   nic::Error err;
-
-  ServerStatusContextCtx* lctx = new ServerStatusContextCtx;
-  if (model_name == nullptr) {
-    err =
-      nic::ServerStatusContext::Create(&(lctx->ctx), std::string(url), verbose);
-  } else {
-    err =
-      nic::ServerStatusContext::Create(
-        &(lctx->ctx), std::string(url), std::string(model_name), verbose);
-  }
-
+  ProtocolType protocol;
+  err = ParseProtocol(&protocol, protocol_int);
   if (err.IsOk()) {
-    *ctx = lctx;
-    return nullptr;
+    ServerStatusContextCtx* lctx = new ServerStatusContextCtx;
+    if (model_name == nullptr) {
+      if (protocol == ProtocolType::HTTP) {
+        err = nic::ServerStatusHttpContext::Create(
+          &(lctx->ctx), std::string(url), verbose);
+      } else {
+        err = nic::ServerStatusGrpcContext::Create(
+          &(lctx->ctx), std::string(url), verbose);
+      }
+    } else {
+      if (protocol == ProtocolType::HTTP) {
+        err = nic::ServerStatusHttpContext::Create(
+          &(lctx->ctx), std::string(url),
+          std::string(model_name), verbose);
+      } else {
+        err = nic::ServerStatusGrpcContext::Create(
+          &(lctx->ctx), std::string(url),
+          std::string(model_name), verbose);
+      }
+    }
+
+    if (err.IsOk()) {
+      *ctx = lctx;
+      return nullptr;
+    }
+    // delete the newed struct if Create() failed
+    delete lctx;
   }
 
   *ctx = nullptr;
@@ -136,18 +176,29 @@ struct InferContextCtx {
 
 nic::Error*
 InferContextNew(
-  InferContextCtx** ctx, const char* url, const char* model_name,
-  int model_version, bool verbose)
+  InferContextCtx** ctx, const char* url, int protocol_int,
+  const char* model_name, int model_version, bool verbose)
 {
-  InferContextCtx* lctx = new InferContextCtx;
-  nic::Error err =
-    nic::InferContext::Create(
-      &(lctx->ctx), std::string(url), std::string(model_name), model_version,
-      verbose);
-
+  nic::Error err;
+  ProtocolType protocol;
+  err = ParseProtocol(&protocol, protocol_int);
   if (err.IsOk()) {
-    *ctx = lctx;
-    return nullptr;
+    InferContextCtx* lctx = new InferContextCtx;
+    if (protocol == ProtocolType::HTTP) {
+      err = nic::InferHttpContext::Create(
+        &(lctx->ctx), std::string(url),
+        std::string(model_name), model_version, verbose);
+    } else {
+      err = nic::InferGrpcContext::Create(
+        &(lctx->ctx), std::string(url),
+        std::string(model_name), model_version, verbose);
+    }
+
+    if (err.IsOk()) {
+      *ctx = lctx;
+      return nullptr;
+    }
+    delete lctx;
   }
 
   *ctx = nullptr;

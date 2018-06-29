@@ -37,16 +37,18 @@ constexpr char kStatusRESTEndpoint[] = "api/status";
 constexpr char kProfileRESTEndpoint[] = "api/profile";
 
 constexpr char kTensorFlowGraphDefPlatform[] = "tensorflow_graphdef";
-constexpr char kTensorFlowSavedModelPlatform[] = "tensorflow_saved_model";
+constexpr char kTensorFlowSavedModelPlatform[] = "tensorflow_savedmodel";
 constexpr char kTensorRTPLANPlatform[] = "tensorrt_plan";
 constexpr char kCaffe2NetDefPlatform[] = "caffe2_netdef";
 
 constexpr char kModelConfigPbTxt[] = "config.pbtxt";
 constexpr char kTensorRTPlanFilename[] = "model.plan";
 constexpr char kTensorFlowGraphDefFilename[] = "model.graphdef";
+constexpr char kTensorFlowSavedModelFilename[] = "model.savedmodel";
 constexpr char kCaffe2NetDefFilename[] = "model.netdef";
 constexpr char kCaffe2NetDefInitFilenamePrefix[] = "init_";
 
 constexpr uint64_t NANOS_PER_SECOND = 1000000000;
+constexpr int MAX_GRPC_MESSAGE_SIZE = 100 * 1024 * 1024;
 
 }}  // namespace nvidia::inferenceserver

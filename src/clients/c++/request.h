@@ -25,11 +25,14 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #pragma once
 
+#include <grpcpp/grpcpp.h>
 #include <memory>
 #include <string>
 #include <vector>
 #include <curl/curl.h>
 #include "src/core/api.pb.h"
+#include "src/core/grpc_service.grpc.pb.h"
+#include "src/core/grpc_service.pb.h"
 #include "src/core/model_config.pb.h"
 #include "src/core/model_config.h"
 #include "src/core/request_status.pb.h"
@@ -95,10 +98,13 @@ private:
 // A ServerStatusContext object is used to query an inference server
 // for status information, including information about the models
 // available on that server. Once created a ServerStatusContext object
-// can be used repeatedly to get status from the server. For example:
+// can be used repeatedly to get status from the server.
+// A ServerStatusContext object can use either HTTP protocol or gRPC protocol
+// depending on the Create function (ServerStatusHttpContext::Create or
+// ServerStatusGrpcContext::Create). For example:
 //
 //   std::unique_ptr<ServerStatusContext> ctx;
-//   ServerStatusContext::Create(&ctx, "localhost:8000");
+//   ServerStatusHttpContext::Create(&ctx, "localhost:8000");
 //   ServerStatus status;
 //   ctx->GetServerStatus(&status);
 //   ...
@@ -113,53 +119,16 @@ private:
 //
 class ServerStatusContext {
 public:
-  // Create context that returns information about server and all
-  // models on the server.
-  // @param ctx - returns the new ServerStatusContext object
-  // @param server_url - inference server name and port
-  // @param verbose - if true generate verbose output when contacting
-  // the inference server
-  // @return Error object indicating success or failure.
-  static Error Create(
-    std::unique_ptr<ServerStatusContext>* ctx,
-    const std::string& server_url, bool verbose = false);
-
-  // Create context that returns information about server and one
-  // model.
-  // @param ctx - returns the new ServerStatusContext object
-  // @param server_url - inference server name and port
-  // @param model-name - get information for this model
-  // @param verbose - if true generate verbose output when contacting
-  // the inference server
-  // @return Error object indicating success or failure.
-  static Error Create(
-    std::unique_ptr<ServerStatusContext>* ctx,
-    const std::string& server_url, const std::string& model_name,
-    bool verbose = false);
-
   // Contact the inference server and get status
   // @param status - returns the status
   // @return Error object indicating success or failure
-  Error GetServerStatus(ServerStatus* status);
+  virtual Error GetServerStatus(ServerStatus* status) = 0;
 
-private:
-  static size_t ResponseHeaderHandler(void*, size_t, size_t, void*);
-  static size_t ResponseHandler(void*, size_t, size_t, void*);
-
-  ServerStatusContext(const std::string&, bool);
-  ServerStatusContext(const std::string&, const std::string&, bool);
-
-  // URL for status endpoint on inference server.
-  const std::string url_;
+protected:
+  ServerStatusContext(bool);
 
   // If true print verbose output
   const bool verbose_;
-
-  // RequestStatus received in server response
-  RequestStatus request_status_;
-
-  // Serialized ServerStatus response from server.
-  std::string response_;
 };
 
 //==============================================================================
@@ -169,10 +138,13 @@ private:
 // server for a specific model. Once created an InferContext object
 // can be used repeatedly to perform inference using the
 // model. Options that control how inference is performed can be
-// changed in between inference runs. For example:
+// changed in between inference runs.
+// A InferContext object can use either HTTP protocol or gRPC protocol
+// depending on the Create function (InferHttpContext::Create or
+// InferGrpcContext::Create). For example:
 //
 //   std::unique_ptr<InferContext> ctx;
-//   InferContext::Create(&ctx, "localhost:8000", "mnist");
+//   InferHttpContext::Create(&ctx, "localhost:8000", "mnist");
 //   ...
 //   std::unique_ptr<Options> options0;
 //   Options::Create(&options0);
@@ -406,20 +378,6 @@ public:
 };
 
 public:
-  // Create context that performs inference for a model.
-  // @param ctx - returns the new InferContext object
-  // @param server_url - inference server name and port
-  // @param model_name - name of the model to use for inference
-  // @param model_version - version of the model to use for inference,
-  // or -1 to indicate that the latest (i.e. highest version number)
-  // version should be used
-  // @param verbose - if true generate verbose output when contacting
-  // the inference server
-  // @return Error object indicating success or failure.
-  static Error Create(
-    std::unique_ptr<InferContext>* ctx, const std::string& server_url,
-    const std::string& model_name, int model_version = -1, bool verbose = false);
-
   // @return the model name being used for inference.
   const std::string& ModelName() const { return model_name_; }
 
@@ -467,14 +425,18 @@ public:
   // specified in the options.
   // @param results - returns Result objects holding inference results.
   // @return Error object indicating success or failure
-  Error Run(std::vector<std::unique_ptr<Result>>* results);
+  virtual Error Run(std::vector<std::unique_ptr<Result>>* results) = 0;
 
-private:
-  static size_t RequestProvider(void*, size_t, size_t, void*);
-  static size_t ResponseHeaderHandler(void*, size_t, size_t, void*);
-  static size_t ResponseHandler(void*, size_t, size_t, void*);
+protected:
+  InferContext(const std::string&, int, bool);
 
-  InferContext(const std::string&, const std::string&, int, bool);
+  // Helper function called before inference to reset position indicators
+  // and prepare placeholders for inference result
+  Error PreRunProcessing();
+
+  // Helper function called after inference to initialize non-RAW results in
+  // 'requested_results_'.
+  Error PostRunProcessing(InferResponseHeader& infer_response);
 
   // Copy into 'buf' up to 'size' bytes of input data. Return the
   // actual amount copied in 'input_bytes'.
@@ -484,9 +446,6 @@ private:
   // 'buf'. Return the actual amount copied in 'result_<bytes'.
   Error SetNextRawResult(
     const uint8_t* buf, size_t size, size_t* result_bytes);
-
-  // URL to POST to
-  std::string url_;
 
   // Model name
   const std::string model_name_;
@@ -510,7 +469,6 @@ private:
 
   // InferRequestHeader protobuf describing the request
   InferRequestHeader infer_request_;
-  std::string infer_request_str_;
 
   // RequestStatus received in server response
   RequestStatus request_status_;
@@ -540,10 +498,13 @@ private:
 //
 // A ProfileContext object is used to control profiling on the
 // inference server. Once created a ProfileContext object can be used
-// repeatedly. For example:
+// repeatedly.
+// A ProfileContext object can use either HTTP protocol or gRPC protocol
+// depending on the Create function (ProfileHttpContext::Create or
+// ProfileGrpcContext::Create). For example:
 //
 //   std::unique_ptr<ProfileContext> ctx;
-//   ProfileContext::Create(&ctx, "localhost:8000");
+//   ProfileGrpcContext::Create(&ctx, "localhost:8000");
 //   ctx->StartProfile();
 //   ...
 //   ctx->StopProfile();
@@ -556,7 +517,135 @@ private:
 //
 class ProfileContext {
 public:
-  // Create context that controls profiling on a server.
+  // Start profiling on the inference server
+  // @return Error object indicating success or failure
+  Error StartProfile();
+
+  // Start profiling on the inference server
+  // @return Error object indicating success or failure
+  Error StopProfile();
+
+protected:
+  ProfileContext(bool);
+  virtual Error SendCommand(const std::string& cmd_str) = 0;
+
+  // If true print verbose output
+  const bool verbose_;
+};
+
+//==============================================================================
+// ServerStatusHttpContext
+//
+// A ServerStatusHttpContext object is the HTTP instantiation of
+// the ServerStatusContext class, please refer ServerStatusContext class for
+// detail usage.
+//
+class ServerStatusHttpContext : public ServerStatusContext {
+public:
+  // Create context that returns information about server and all
+  // models on the server using HTTP protocol.
+  // @param ctx - returns the new ServerStatusHttpContext object
+  // @param server_url - inference server name and port
+  // @param verbose - if true generate verbose output when contacting
+  // the inference server
+  // @return Error object indicating success or failure.
+  static Error Create(
+    std::unique_ptr<ServerStatusContext>* ctx,
+    const std::string& server_url, bool verbose = false);
+
+  // Create context that returns information about server and one
+  // model using HTTP protocol.
+  // @param ctx - returns the new ServerStatusHttpContext object
+  // @param server_url - inference server name and port
+  // @param model-name - get information for this model
+  // @param verbose - if true generate verbose output when contacting
+  // the inference server
+  // @return Error object indicating success or failure.
+  static Error Create(
+    std::unique_ptr<ServerStatusContext>* ctx,
+    const std::string& server_url, const std::string& model_name,
+    bool verbose = false);
+
+  // Contact the inference server and get status
+  // @param status - returns the status
+  // @return Error object indicating success or failure
+  Error GetServerStatus(ServerStatus* status) override;
+
+private:
+  static size_t ResponseHeaderHandler(void*, size_t, size_t, void*);
+  static size_t ResponseHandler(void*, size_t, size_t, void*);
+
+  ServerStatusHttpContext(const std::string&, bool);
+  ServerStatusHttpContext(const std::string&, const std::string&, bool);
+
+  // URL for status endpoint on inference server.
+  const std::string url_;
+
+  // RequestStatus received in server response
+  RequestStatus request_status_;
+
+  // Serialized ServerStatus response from server.
+  std::string response_;
+};
+
+//==============================================================================
+// InferHttpContext
+//
+// An InferHttpContext object is the HTTP instantiation of
+// the InferContext class, please refer InferContext class for
+// detail usage.
+//
+class InferHttpContext : public InferContext {
+public:
+  // Create context that performs inference for a model using HTTP protocol.
+  // @param ctx - returns the new InferHttpContext object
+  // @param server_url - inference server name and port
+  // @param model_name - name of the model to use for inference
+  // @param model_version - version of the model to use for inference,
+  // or -1 to indicate that the latest (i.e. highest version number)
+  // version should be used
+  // @param verbose - if true generate verbose output when contacting
+  // the inference server
+  // @return Error object indicating success or failure.
+  static Error Create(
+    std::unique_ptr<InferContext>* ctx, const std::string& server_url,
+    const std::string& model_name, int model_version = -1,
+    bool verbose = false);
+
+  // Send a request to the inference server to perform an inference to
+  // produce a result for the outputs specified in the most recent
+  // call to SetRunOptions(). The Result objects holding the output
+  // values are returned in the same order as the outputs are
+  // specified in the options.
+  // @param results - returns Result objects holding inference results.
+  // @return Error object indicating success or failure
+  Error Run(std::vector<std::unique_ptr<Result>>* results) override;
+
+private:
+  static size_t RequestProvider(void*, size_t, size_t, void*);
+  static size_t ResponseHeaderHandler(void*, size_t, size_t, void*);
+  static size_t ResponseHandler(void*, size_t, size_t, void*);
+
+  InferHttpContext(
+    const std::string&, const std::string&, int, bool);
+
+  // URL to POST to
+  std::string url_;
+
+  // Serialized InferRequestHeader
+  std::string infer_request_str_;
+};
+
+//==============================================================================
+// ProfileHttpContext
+//
+// A ProfileHttpContext object is the HTTP instantiation of
+// the ProfileContext class, please refer ProfileContext class for
+// detail usage.
+//
+class ProfileHttpContext : public ProfileContext {
+public:
+  // Create context that controls profiling on a server using HTTP protocol.
   // @param ctx - returns the new ProfileContext object
   // @param server_url - inference server name and port
   // @param verbose - if true generate verbose output when contacting
@@ -566,28 +655,134 @@ public:
     std::unique_ptr<ProfileContext>* ctx, const std::string& server_url,
     bool verbose = false);
 
-  // Start profiling on the inference server
-  // @return Error object indicating success or failure
-  Error StartProfile();
-
-  // Start profiling on the inference server
-  // @return Error object indicating success or failure
-  Error StopProfile();
-
 private:
   static size_t ResponseHeaderHandler(void*, size_t, size_t, void*);
 
-  ProfileContext(const std::string&, bool);
-  Error SendCommand(const std::string& cmd_str);
+  ProfileHttpContext(const std::string&, bool);
+  Error SendCommand(const std::string& cmd_str) override;
 
   // URL for status endpoint on inference server.
   const std::string url_;
 
-  // If true print verbose output
-  const bool verbose_;
-
   // RequestStatus received in server response
   RequestStatus request_status_;
+};
+
+//==============================================================================
+// ServerStatusGrpcContext
+//
+// A ServerStatusGrpcContext object is the gRPC instantiation of
+// the ServerStatusContext class, please refer ServerStatusContext class for
+// detail usage.
+//
+class ServerStatusGrpcContext : public ServerStatusContext {
+public:
+  // Create context that returns information about server and all
+  // models on the server using gRPC protocol.
+  // @param ctx - returns the new ServerStatusGrpcContext object
+  // @param server_url - inference server name and port
+  // @param verbose - if true generate verbose output when contacting
+  // the inference server
+  // @return Error object indicating success or failure.
+  static Error Create(
+    std::unique_ptr<ServerStatusContext>* ctx, 
+    const std::string& server_url, bool verbose = false);
+
+  // Create context that returns information about server and one
+  // model using gRPC protocol.
+  // @param ctx - returns the new ServerStatusGrpcContext object
+  // @param server_url - inference server name and port
+  // @param model-name - get information for this model
+  // @param verbose - if true generate verbose output when contacting
+  // the inference server
+  // @return Error object indicating success or failure.
+  static Error Create(
+    std::unique_ptr<ServerStatusContext>* ctx,
+    const std::string& server_url, const std::string& model_name,
+    bool verbose = false);
+
+  // Contact the inference server and get status
+  // @param status - returns the status
+  // @return Error object indicating success or failure
+  Error GetServerStatus(ServerStatus* status) override;
+
+private:
+  ServerStatusGrpcContext(const std::string&, bool);
+  ServerStatusGrpcContext(const std::string&, const std::string&, bool);
+
+  // Model name
+  const std::string model_name_;
+
+  // gRPC end point.
+  std::unique_ptr<GRPCService::Stub> stub_; 
+};
+
+//==============================================================================
+// InferGrpcContext
+//
+// A InferGrpcContext object is the gRPC instantiation of
+// the InferContext class, please refer InferContext class for
+// detail usage.
+//
+class InferGrpcContext : public InferContext {
+public:
+  // Create context that performs inference for a model using gRPC protocol.
+  // @param ctx - returns the new InferContext object
+  // @param server_url - inference server name and port
+  // @param model_name - name of the model to use for inference
+  // @param model_version - version of the model to use for inference,
+  // or -1 to indicate that the latest (i.e. highest version number)
+  // version should be used
+  // @param verbose - if true generate verbose output when contacting
+  // the inference server
+  // @return Error object indicating success or failure.
+  static Error Create(
+    std::unique_ptr<InferContext>* ctx, const std::string& server_url,
+    const std::string& model_name, int model_version = -1,
+    bool verbose = false);
+
+  // Send a request to the inference server to perform an inference to
+  // produce a result for the outputs specified in the most recent
+  // call to SetRunOptions(). The Result objects holding the output
+  // values are returned in the same order as the outputs are
+  // specified in the options.
+  // @param results - returns Result objects holding inference results.
+  // @return Error object indicating success or failure
+  Error Run(std::vector<std::unique_ptr<Result>>* results) override;
+
+private:
+  InferGrpcContext(
+    const std::string&, const std::string&, int, bool);
+
+  // gRPC end point.
+  std::unique_ptr<GRPCService::Stub> stub_; 
+};
+
+//==============================================================================
+// ProfileGrpcContext
+//
+// A ProfileGrpcContext object is the gRPC instantiation of
+// the ProfileContext class, please refer ProfileContext class for
+// detail usage.
+//
+class ProfileGrpcContext : public ProfileContext {
+public:
+  // Create context that controls profiling on a server using gRPC protocol.
+  // @param ctx - returns the new ProfileContext object
+  // @param server_url - inference server name and port
+  // @param verbose - if true generate verbose output when contacting
+  // the inference server
+  // @return Error object indicating success or failure.
+  static Error Create(
+    std::unique_ptr<ProfileContext>* ctx, const std::string& server_url,
+    bool verbose = false);
+
+private:
+  ProfileGrpcContext(const std::string&, bool);
+  Error SendCommand(const std::string& cmd_str) override;
+
+  // gRPC end point.
+  std::unique_ptr<GRPCService::Stub> stub_; 
 };
 
 //==============================================================================

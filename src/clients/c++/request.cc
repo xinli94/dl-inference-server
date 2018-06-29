@@ -27,6 +27,7 @@
 #include "src/clients/c++/request.h"
 
 #include <iostream>
+#include <memory>
 #include <curl/curl.h>
 #include <google/protobuf/text_format.h>
 #include "src/core/constants.h"
@@ -67,6 +68,27 @@ static CurlGlobal curl_global;
 
 //==============================================================================
 
+// Use map to keep track of gRPC channels. <key, value> : <url, Channel*>
+// If context is created on url that has established Channel, then reuse it.
+std::map<std::string, std::shared_ptr<grpc::Channel>> grpc_channel_map_;
+std::shared_ptr<grpc::Channel> GetChannel(const std::string& url)
+{
+  const auto& channel_itr = grpc_channel_map_.find(url);
+  if (channel_itr != grpc_channel_map_.end()) {
+    return channel_itr->second;
+  } else {
+    grpc::ChannelArguments arguments;
+    arguments.SetMaxSendMessageSize(MAX_GRPC_MESSAGE_SIZE);
+    arguments.SetMaxReceiveMessageSize(MAX_GRPC_MESSAGE_SIZE);
+    std::shared_ptr<grpc::Channel> channel = grpc::CreateCustomChannel(
+      url, grpc::InsecureChannelCredentials(), arguments);
+    grpc_channel_map_.insert(std::make_pair(url, channel));
+    return channel;
+  }
+}
+
+//==============================================================================
+
 const Error Error::Success(RequestStatusCode::SUCCESS);
 
 Error::Error(RequestStatusCode code, const std::string& msg)
@@ -99,147 +121,10 @@ operator<<(std::ostream& out, const Error& err)
 }
 
 //==============================================================================
-Error ServerStatusContext::Create(
-  std::unique_ptr<ServerStatusContext>* ctx, const std::string& server_url,
-  bool verbose)
+
+ServerStatusContext::ServerStatusContext(bool verbose)
+  : verbose_(verbose)
 {
-  ctx->reset(new ServerStatusContext(server_url, verbose));
-  return Error::Success;
-}
-
-Error ServerStatusContext::Create(
-  std::unique_ptr<ServerStatusContext>* ctx, const std::string& server_url,
-  const std::string& model_name, bool verbose)
-{
-  ctx->reset(new ServerStatusContext(server_url, model_name, verbose));
-  return Error::Success;
-}
-
-ServerStatusContext::ServerStatusContext(
-  const std::string& server_url, bool verbose)
-  : url_(server_url + "/" + kStatusRESTEndpoint), verbose_(verbose)
-{
-}
-
-ServerStatusContext::ServerStatusContext(
-  const std::string& server_url, const std::string& model_name, bool verbose)
-  : url_(server_url + "/" + kStatusRESTEndpoint + "/" + model_name),
-    verbose_(verbose)
-{
-}
-
-Error
-ServerStatusContext::GetServerStatus(ServerStatus* server_status)
-{
-  server_status->Clear();
-  request_status_.Clear();
-  response_.clear();
-
-  if (!curl_global.Status().IsOk()) {
-    return curl_global.Status();
-  }
-
-  CURL* curl = curl_easy_init();
-  if (!curl) {
-    return
-      Error(RequestStatusCode::INTERNAL, "failed to initialize HTTP client");
-  }
-
-  // Want binary representation of the status.
-  std::string full_url = url_ + "?format=binary";
-  curl_easy_setopt(curl, CURLOPT_URL, full_url.c_str());
-  curl_easy_setopt(curl, CURLOPT_USERAGENT, "libcurl-agent/1.0");
-  if (verbose_) {
-    curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
-  }
-
-  // response headers handled by ResponseHeaderHandler()
-  curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, ResponseHeaderHandler);
-  curl_easy_setopt(curl, CURLOPT_HEADERDATA, this);
-
-  // response data handled by ResponseHandler()
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, ResponseHandler);
-  curl_easy_setopt(curl, CURLOPT_WRITEDATA, this);
-
-  CURLcode res = curl_easy_perform(curl);
-  if (res != CURLE_OK) {
-    curl_easy_cleanup(curl);
-    return
-      Error(
-        RequestStatusCode::INTERNAL, "HTTP client failed: " +
-        std::string(curl_easy_strerror(res)));
-  }
-
-  // Must use 64-bit integer with curl_easy_getinfo
-  int64_t http_code;
-  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-
-  curl_easy_cleanup(curl);
-
-  // Should have a request status, if not then create an error status.
-  if (request_status_.code() == RequestStatusCode::INVALID) {
-    request_status_.Clear();
-    request_status_.set_code(RequestStatusCode::INTERNAL);
-    request_status_.set_msg("status request did not return status");
-  }
-
-  // If request has failing HTTP status or the request's explicit
-  // status is not SUCCESS, then signal an error.
-  if ((http_code != 200) ||
-      (request_status_.code() != RequestStatusCode::SUCCESS)) {
-    return Error(request_status_);
-  }
-
-  // Parse the response as a ModelConfigList...
-  if (!server_status->ParseFromString(response_)) {
-    return Error(RequestStatusCode::INTERNAL, "failed to parse server status");
-  }
-
-  if (verbose_) {
-    std::cout << server_status->DebugString() << std::endl;
-  }
-
-  return Error(request_status_);
-}
-
-size_t
-ServerStatusContext::ResponseHeaderHandler(
-  void* contents, size_t size, size_t nmemb, void* userp)
-{
-  ServerStatusContext* ctx = reinterpret_cast<ServerStatusContext*>(userp);
-
-  char* buf = reinterpret_cast<char*>(contents);
-  size_t byte_size = size * nmemb;
-
-  size_t idx = strlen(kStatusHTTPHeader);
-  if ((idx < byte_size) &&
-      !strncasecmp(buf, kStatusHTTPHeader, idx)) {
-    while ((idx < byte_size) && (buf[idx] != ':')) {
-      ++idx;
-    }
-
-    if (idx < byte_size) {
-      std::string hdr(buf + idx + 1, byte_size - idx - 1);
-
-      if (!google::protobuf::TextFormat::ParseFromString(
-          hdr, &ctx->request_status_)) {
-        ctx->request_status_.Clear();
-      }
-    }
-  }
-
-  return byte_size;
-}
-
-size_t
-ServerStatusContext::ResponseHandler(
-  void* contents, size_t size, size_t nmemb, void* userp)
-{
-  ServerStatusContext* ctx = reinterpret_cast<ServerStatusContext*>(userp);
-  uint8_t* buf = reinterpret_cast<uint8_t*>(contents);
-  size_t result_bytes = size * nmemb;
-  std::copy(buf, buf + result_bytes, std::back_inserter(ctx->response_));
-  return result_bytes;
 }
 
 //==============================================================================
@@ -329,6 +214,9 @@ public:
   // the actual amount copied in 'input_bytes'.
   Error GetNext(uint8_t* buf, size_t size, size_t* input_bytes);
 
+  // Copy the pointer of the raw buffer at 'batch_idx' into 'buf'
+  Error GetRaw(size_t batch_idx, const uint8_t** buf) const;
+
   // Prepare to send this input as part of a request.
   Error PrepareForRequest();
 
@@ -402,6 +290,23 @@ InputImpl::GetNext(uint8_t* buf, size_t size, size_t* input_bytes)
   }
 
   *input_bytes = total_size;
+  return Error::Success;
+}
+
+Error
+InputImpl::GetRaw(
+  size_t batch_idx, const uint8_t** buf) const
+{
+  if (batch_idx >= batch_size_) {
+    return
+      Error(
+        RequestStatusCode::INVALID_ARG,
+        "unexpected batch entry " + std::to_string(batch_idx) +
+        " requested for input '" + Name() +
+        "', batch size is " + std::to_string(batch_size_));
+  }
+
+  *buf = bufs_[batch_idx];
   return Error::Success;
 }
 
@@ -724,63 +629,12 @@ ResultImpl::SetNextRawResult(
 
 //==============================================================================
 
-Error
-InferContext::Create(
-  std::unique_ptr<InferContext>* ctx, const std::string& server_url,
-  const std::string& model_name, int model_version, bool verbose)
-{
-  ctx->reset(new InferContext(server_url, model_name, model_version, verbose));
-
-  // Get status of the model and create the inputs and outputs.
-  std::unique_ptr<ServerStatusContext> sctx;
-  Error err =
-    ServerStatusContext::Create(&sctx, server_url, model_name, verbose);
-  if (err.IsOk()) {
-    ServerStatus server_status;
-    err = sctx->GetServerStatus(&server_status);
-    if (err.IsOk()) {
-      const auto& itr = server_status.model_status().find(model_name);
-      if (itr == server_status.model_status().end()) {
-        err =
-          Error(
-            RequestStatusCode::INTERNAL,
-            "unable to find status information for \"" + model_name + "\"");
-      } else {
-        const ModelConfig& model_info = itr->second.config();
-
-        (*ctx)->max_batch_size_ =
-          static_cast<uint64_t>(std::max(0, model_info.max_batch_size()));
-
-        // Create inputs and outputs
-        for (const auto& io : model_info.input()) {
-          (*ctx)->inputs_.emplace_back(std::make_shared<InputImpl>(io));
-        }
-        for (const auto& io : model_info.output()) {
-          (*ctx)->outputs_.emplace_back(std::make_shared<OutputImpl>(io));
-        }
-      }
-    }
-  }
-
-  if (!err.IsOk()) {
-    ctx->reset();
-  }
-
-  return err;
-}
-
 InferContext::InferContext(
-  const std::string& server_url, const std::string& model_name,
-  int model_version, bool verbose)
+  const std::string& model_name, int model_version, bool verbose)
   : model_name_(model_name), model_version_(model_version),
     verbose_(verbose), total_input_byte_size_(0), batch_size_(0),
     input_pos_idx_(0), result_pos_idx_(0)
 {
-  // URL doesn't contain the version portion if using the latest version.
-  url_ = server_url + "/" + kInferRESTEndpoint + "/" + model_name;
-  if (model_version_ >= 0) {
-    url_ += "/" + std::to_string(model_version_);
-  }
 }
 
 Error
@@ -837,7 +691,6 @@ InferContext::SetRunOptions(const InferContext::Options& boptions)
   // Create the InferRequestHeader protobuf. This protobuf will be
   // used for all subsequent requests.
   infer_request_.Clear();
-  infer_request_str_.clear();
 
   infer_request_.set_batch_size(batch_size_);
 
@@ -869,28 +722,12 @@ InferContext::SetRunOptions(const InferContext::Options& boptions)
     }
   }
 
-  infer_request_str_ =
-    std::string(kInferRequestHTTPHeader) + ":" +
-    infer_request_.ShortDebugString();
-
   return Error::Success;
 }
 
 Error
-InferContext::Run(std::vector<std::unique_ptr<Result>>* results)
+InferContext::PreRunProcessing()
 {
-  results->clear();
-
-  if (!curl_global.Status().IsOk()) {
-    return curl_global.Status();
-  }
-
-  CURL* curl = curl_easy_init();
-  if (!curl) {
-    return
-      Error(RequestStatusCode::INTERNAL, "failed to initialize HTTP client");
-  }
-
   infer_response_buffer_.clear();
 
   // Reset all the position indicators so that we send all inputs
@@ -913,83 +750,12 @@ InferContext::Run(std::vector<std::unique_ptr<Result>>* results)
           reinterpret_cast<OutputImpl*>(io.get())->ResultFormat()));
     requested_results_.emplace_back(std::move(rp));
   }
+  return Error::Success;
+}
 
-  std::string full_url = url_ + "?format=binary";
-  curl_easy_setopt(curl, CURLOPT_URL, full_url.c_str());
-  curl_easy_setopt(curl, CURLOPT_USERAGENT, "libcurl-agent/1.0");
-  curl_easy_setopt(curl, CURLOPT_POST, 1L);
-  if (verbose_) {
-    curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
-  }
-
-  // request data provided by RequestProvider()
-  curl_easy_setopt(curl, CURLOPT_READFUNCTION, RequestProvider);
-  curl_easy_setopt(curl, CURLOPT_READDATA, this);
-
-  // response headers handled by ResponseHeaderHandler()
-  curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, ResponseHeaderHandler);
-  curl_easy_setopt(curl, CURLOPT_HEADERDATA, this);
-
-  // response data handled by ResponseHandler()
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, ResponseHandler);
-  curl_easy_setopt(curl, CURLOPT_WRITEDATA, this);
-
-  // set the expected POST size. If you want to POST large amounts of
-  // data, consider CURLOPT_POSTFIELDSIZE_LARGE
-  curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, total_input_byte_size_);
-
-  // Headers to specify input and output tensors
-  struct curl_slist *list = NULL;
-  list = curl_slist_append(list, "Expect:");
-  list = curl_slist_append(list, "Content-Type: application/octet-stream");
-  list = curl_slist_append(list, infer_request_str_.c_str());
-  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, list);
-
-  CURLcode res = curl_easy_perform(curl);
-  if (res != CURLE_OK) {
-    curl_slist_free_all(list);
-    curl_easy_cleanup(curl);
-    requested_results_.clear();
-    return
-      Error(
-        RequestStatusCode::INTERNAL, "HTTP client failed: " +
-        std::string(curl_easy_strerror(res)));
-  }
-
-  // Must use 64-bit integer with curl_easy_getinfo
-  int64_t http_code;
-  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-
-  curl_slist_free_all(list);
-  curl_easy_cleanup(curl);
-
-  // Should have a request status, if not then create an error status.
-  if (request_status_.code() == RequestStatusCode::INVALID) {
-    request_status_.Clear();
-    request_status_.set_code(RequestStatusCode::INTERNAL);
-    request_status_.set_msg("infer request did not return status");
-  }
-
-  // If request has failing HTTP status or the request's explicit
-  // status is not SUCCESS, then signal an error.
-  if ((http_code != 200) ||
-      (request_status_.code() != RequestStatusCode::SUCCESS)) {
-    requested_results_.clear();
-    return Error(request_status_);
-  }
-
-  // The infer response header should be available...
-  if (infer_response_buffer_.empty()) {
-    requested_results_.clear();
-    return
-      Error(
-        RequestStatusCode::INTERNAL,
-        "infer request did not return result header");
-  }
-
-  InferResponseHeader infer_response;
-  infer_response.ParseFromString(infer_response_buffer_);
-
+Error
+InferContext::PostRunProcessing(InferResponseHeader& infer_response)
+{
   // At this point, the RAW requested results have their result values
   // set. Now need to initialize non-RAW results.
   for (auto& rr : requested_results_) {
@@ -1011,73 +777,7 @@ InferContext::Run(std::vector<std::unique_ptr<Result>>* results)
       }
     }
   }
-
-  results->swap(requested_results_);
-
-  return Error(request_status_);
-}
-
-size_t
-InferContext::RequestProvider(
-  void* contents, size_t size, size_t nmemb, void* userp)
-{
-  InferContext* ctx = reinterpret_cast<InferContext*>(userp);
-
-  size_t input_bytes = 0;
-  Error err =
-    ctx->GetNextInput(
-      reinterpret_cast<uint8_t*>(contents), size * nmemb, &input_bytes);
-  if (!err.IsOk()) {
-    std::cerr << "RequestProvider: " << err << std::endl;
-    return CURL_READFUNC_ABORT;
-  }
-
-  return input_bytes;
-}
-
-size_t
-InferContext::ResponseHeaderHandler(
-  void* contents, size_t size, size_t nmemb, void* userp)
-{
-  InferContext* ctx = reinterpret_cast<InferContext*>(userp);
-  char* buf = reinterpret_cast<char*>(contents);
-  size_t byte_size = size * nmemb;
-
-  size_t idx = strlen(kStatusHTTPHeader);
-  if ((idx < byte_size) &&
-      !strncasecmp(buf, kStatusHTTPHeader, idx)) {
-    while ((idx < byte_size) && (buf[idx] != ':')) {
-      ++idx;
-    }
-
-    if (idx < byte_size) {
-      std::string hdr(buf + idx + 1, byte_size - idx - 1);
-      if (!google::protobuf::TextFormat::ParseFromString(
-          hdr, &ctx->request_status_)) {
-        ctx->request_status_.Clear();
-      }
-    }
-  }
-
-  return byte_size;
-}
-
-size_t
-InferContext::ResponseHandler(
-  void* contents, size_t size, size_t nmemb, void* userp)
-{
-  InferContext* ctx = reinterpret_cast<InferContext*>(userp);
-  size_t result_bytes = 0;
-
-  Error err =
-    ctx->SetNextRawResult(
-      reinterpret_cast<uint8_t*>(contents), size * nmemb, &result_bytes);
-  if (!err.IsOk()) {
-    std::cerr << "ResponseHandler: " << err << std::endl;
-    return 0;
-  }
-
-  return result_bytes;
+  return Error::Success;
 }
 
 Error
@@ -1086,7 +786,8 @@ InferContext::GetNextInput(uint8_t* buf, size_t size, size_t* input_bytes)
   *input_bytes = 0;
 
   while ((size > 0) && (input_pos_idx_ < inputs_.size())) {
-    InputImpl* io = reinterpret_cast<InputImpl*>(inputs_[input_pos_idx_].get());
+    InputImpl* io =
+      reinterpret_cast<InputImpl*>(inputs_[input_pos_idx_].get());
     size_t ib = 0;
     Error err = io->GetNext(buf, size, &ib);
     if (!err.IsOk()) {
@@ -1146,23 +847,428 @@ InferContext::SetNextRawResult(
 }
 
 //==============================================================================
-Error
-ProfileContext::Create(
-  std::unique_ptr<ProfileContext>* ctx, const std::string& server_url,
-  bool verbose)
+
+ProfileContext::ProfileContext(bool verbose)
+  : verbose_(verbose)
 {
-  ctx->reset(new ProfileContext(server_url, verbose));
+}
+
+Error
+ProfileContext::StartProfile()
+{
+  return SendCommand("start");
+}
+
+Error
+ProfileContext::StopProfile()
+{
+  return SendCommand("stop");
+}
+
+//==============================================================================
+
+Error
+ServerStatusHttpContext::Create(
+  std::unique_ptr<ServerStatusContext>* ctx,
+  const std::string& server_url, bool verbose)
+{
+  ctx->reset(
+    static_cast<ServerStatusContext*>(
+      new ServerStatusHttpContext(server_url, verbose)));
   return Error::Success;
 }
 
-ProfileContext::ProfileContext(
+Error
+ServerStatusHttpContext::Create(
+  std::unique_ptr<ServerStatusContext>* ctx,
+  const std::string& server_url, const std::string& model_name, bool verbose)
+{
+  ctx->reset(
+    static_cast<ServerStatusContext*>(
+      new ServerStatusHttpContext(server_url, model_name, verbose)));
+  return Error::Success;
+}
+
+ServerStatusHttpContext::ServerStatusHttpContext(
   const std::string& server_url, bool verbose)
-  : url_(server_url + "/" + kProfileRESTEndpoint), verbose_(verbose)
+  : ServerStatusContext(verbose), url_(server_url + "/" + kStatusRESTEndpoint)
+{
+}
+
+ServerStatusHttpContext::ServerStatusHttpContext(
+  const std::string& server_url, const std::string& model_name, bool verbose)
+  : ServerStatusContext(verbose),
+    url_(server_url + "/" + kStatusRESTEndpoint + "/" + model_name)
 {
 }
 
 Error
-ProfileContext::SendCommand(const std::string& cmd_str)
+ServerStatusHttpContext::GetServerStatus(ServerStatus* server_status)
+{
+  server_status->Clear();
+  request_status_.Clear();
+  response_.clear();
+  
+  if (!curl_global.Status().IsOk()) {
+    return curl_global.Status();
+  }
+
+  CURL* curl = curl_easy_init();
+  if (!curl) {
+    return
+      Error(RequestStatusCode::INTERNAL, "failed to initialize HTTP client");
+  }
+
+  // Want binary representation of the status.
+  std::string full_url = url_ + "?format=binary";
+  curl_easy_setopt(curl, CURLOPT_URL, full_url.c_str());
+  curl_easy_setopt(curl, CURLOPT_USERAGENT, "libcurl-agent/1.0");
+  if (verbose_) {
+    curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+  }
+
+  // response headers handled by ResponseHeaderHandler()
+  curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, ResponseHeaderHandler);
+  curl_easy_setopt(curl, CURLOPT_HEADERDATA, this);
+
+  // response data handled by ResponseHandler()
+  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, ResponseHandler);
+  curl_easy_setopt(curl, CURLOPT_WRITEDATA, this);
+
+  CURLcode res = curl_easy_perform(curl);
+  if (res != CURLE_OK) {
+    curl_easy_cleanup(curl);
+    return
+      Error(
+        RequestStatusCode::INTERNAL, "HTTP client failed: " +
+        std::string(curl_easy_strerror(res)));
+  }
+
+  // Must use 64-bit integer with curl_easy_getinfo
+  int64_t http_code;
+  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+  curl_easy_cleanup(curl);
+
+  // Should have a request status, if not then create an error status.
+  if (request_status_.code() == RequestStatusCode::INVALID) {
+    request_status_.Clear();
+    request_status_.set_code(RequestStatusCode::INTERNAL);
+    request_status_.set_msg("status request did not return status");
+  }
+
+  // If request has failing HTTP status or the request's explicit
+  // status is not SUCCESS, then signal an error.
+  if ((http_code != 200) ||
+      (request_status_.code() != RequestStatusCode::SUCCESS)) {
+    return Error(request_status_);
+  }
+
+  // Parse the response as a ModelConfigList...
+  if (!server_status->ParseFromString(response_)) {
+    return Error(RequestStatusCode::INTERNAL, "failed to parse server status");
+  }
+
+  if (verbose_) {
+    std::cout << server_status->DebugString() << std::endl;
+  }
+
+  return Error(request_status_);
+}
+
+size_t
+ServerStatusHttpContext::ResponseHeaderHandler(
+  void* contents, size_t size, size_t nmemb, void* userp)
+{
+  ServerStatusHttpContext* ctx =
+    reinterpret_cast<ServerStatusHttpContext*>(userp);
+
+  char* buf = reinterpret_cast<char*>(contents);
+  size_t byte_size = size * nmemb;
+
+  size_t idx = strlen(kStatusHTTPHeader);
+  if ((idx < byte_size) &&
+      !strncasecmp(buf, kStatusHTTPHeader, idx)) {
+    while ((idx < byte_size) && (buf[idx] != ':')) {
+      ++idx;
+    }
+
+    if (idx < byte_size) {
+      std::string hdr(buf + idx + 1, byte_size - idx - 1);
+
+      if (!google::protobuf::TextFormat::ParseFromString(
+          hdr, &ctx->request_status_)) {
+        ctx->request_status_.Clear();
+      }
+    }
+  }
+
+  return byte_size;
+}
+
+size_t
+ServerStatusHttpContext::ResponseHandler(
+  void* contents, size_t size, size_t nmemb, void* userp)
+{
+  ServerStatusHttpContext* ctx = 
+    reinterpret_cast<ServerStatusHttpContext*>(userp);
+  uint8_t* buf = reinterpret_cast<uint8_t*>(contents);
+  size_t result_bytes = size * nmemb;
+  std::copy(buf, buf + result_bytes, std::back_inserter(ctx->response_));
+  return result_bytes;
+}
+
+//==============================================================================
+
+Error
+InferHttpContext::Create(
+  std::unique_ptr<InferContext>* ctx, const std::string& server_url,
+  const std::string& model_name, int model_version, bool verbose)
+{
+  InferHttpContext* ctx_ptr = 
+    new InferHttpContext(server_url, model_name, model_version, verbose);
+
+  // Get status of the model and create the inputs and outputs.
+  std::unique_ptr<ServerStatusContext> sctx;
+  Error err =
+    ServerStatusHttpContext::Create(
+      &sctx, server_url, model_name, verbose);
+  if (err.IsOk()) {
+    ServerStatus server_status;
+    err = sctx->GetServerStatus(&server_status);
+    if (err.IsOk()) {
+      const auto& itr = server_status.model_status().find(model_name);
+      if (itr == server_status.model_status().end()) {
+        err =
+          Error(
+            RequestStatusCode::INTERNAL,
+            "unable to find status information for \"" + model_name + "\"");
+      } else {
+        const ModelConfig& model_info = itr->second.config();
+
+        ctx_ptr->max_batch_size_ =
+          static_cast<uint64_t>(std::max(0, model_info.max_batch_size()));
+
+        // Create inputs and outputs
+        for (const auto& io : model_info.input()) {
+          ctx_ptr->inputs_.emplace_back(std::make_shared<InputImpl>(io));
+        }
+        for (const auto& io : model_info.output()) {
+          ctx_ptr->outputs_.emplace_back(std::make_shared<OutputImpl>(io));
+        }
+      }
+    }
+  }
+
+  if (err.IsOk()) {
+    ctx->reset(static_cast<InferContext*>(ctx_ptr));
+  } else {
+    ctx->reset();
+  }
+
+  return err;
+}
+
+InferHttpContext::InferHttpContext(
+  const std::string& server_url, const std::string& model_name,
+  int model_version, bool verbose)
+  : InferContext(model_name, model_version, verbose)
+{
+  // Process url for HTTP request
+  // URL doesn't contain the version portion if using the latest version.
+  url_ = server_url + "/" + kInferRESTEndpoint + "/" + model_name;
+  if (model_version_ >= 0) {
+    url_ += "/" + std::to_string(model_version_);
+  }
+}
+
+Error
+InferHttpContext::Run(std::vector<std::unique_ptr<Result>>* results)
+{
+  InferResponseHeader infer_response;
+
+  PreRunProcessing();
+
+  if (!curl_global.Status().IsOk()) {
+    return curl_global.Status();
+  }
+
+  CURL* curl = curl_easy_init();
+  if (!curl) {
+    return
+      Error(RequestStatusCode::INTERNAL, "failed to initialize HTTP client");
+  }
+
+  std::string full_url = url_ + "?format=binary";
+  curl_easy_setopt(curl, CURLOPT_URL, full_url.c_str());
+  curl_easy_setopt(curl, CURLOPT_USERAGENT, "libcurl-agent/1.0");
+  curl_easy_setopt(curl, CURLOPT_POST, 1L);
+  if (verbose_) {
+    curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+  }
+
+  // request data provided by RequestProvider()
+  curl_easy_setopt(curl, CURLOPT_READFUNCTION, RequestProvider);
+  curl_easy_setopt(curl, CURLOPT_READDATA, this);
+
+  // response headers handled by ResponseHeaderHandler()
+  curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, ResponseHeaderHandler);
+  curl_easy_setopt(curl, CURLOPT_HEADERDATA, this);
+
+  // response data handled by ResponseHandler()
+  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, ResponseHandler);
+  curl_easy_setopt(curl, CURLOPT_WRITEDATA, this);
+
+  // set the expected POST size. If you want to POST large amounts of
+  // data, consider CURLOPT_POSTFIELDSIZE_LARGE
+  curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, total_input_byte_size_);
+
+  // Headers to specify input and output tensors
+  infer_request_str_.clear();
+  infer_request_str_ =
+    std::string(kInferRequestHTTPHeader) + ":" +
+    infer_request_.ShortDebugString();
+  struct curl_slist *list = NULL;
+  list = curl_slist_append(list, "Expect:");
+  list = curl_slist_append(list, "Content-Type: application/octet-stream");
+  list = curl_slist_append(list, infer_request_str_.c_str());
+  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, list);
+
+  CURLcode res = curl_easy_perform(curl);
+  if (res != CURLE_OK) {
+    curl_slist_free_all(list);
+    curl_easy_cleanup(curl);
+    requested_results_.clear();
+    return
+      Error(
+        RequestStatusCode::INTERNAL, "HTTP client failed: " +
+        std::string(curl_easy_strerror(res)));
+  }
+
+  // Must use 64-bit integer with curl_easy_getinfo
+  int64_t http_code;
+  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+  curl_slist_free_all(list);
+  curl_easy_cleanup(curl);
+
+  // Should have a request status, if not then create an error status.
+  if (request_status_.code() == RequestStatusCode::INVALID) {
+    request_status_.Clear();
+    request_status_.set_code(RequestStatusCode::INTERNAL);
+    request_status_.set_msg("infer request did not return status");
+  }
+
+  // If request has failing HTTP status or the request's explicit
+  // status is not SUCCESS, then signal an error.
+  if ((http_code != 200) ||
+      (request_status_.code() != RequestStatusCode::SUCCESS)) {
+    requested_results_.clear();
+    return Error(request_status_);
+  }
+
+  // The infer response header should be available...
+  if (infer_response_buffer_.empty()) {
+    requested_results_.clear();
+    return
+      Error(
+        RequestStatusCode::INTERNAL,
+        "infer request did not return result header");
+  }
+
+  infer_response.ParseFromString(infer_response_buffer_);
+
+  PostRunProcessing(infer_response);
+
+  results->swap(requested_results_);
+
+  return Error(request_status_);
+}
+
+size_t
+InferHttpContext::RequestProvider(
+  void* contents, size_t size, size_t nmemb, void* userp)
+{
+  InferHttpContext* ctx = reinterpret_cast<InferHttpContext*>(userp);
+
+  size_t input_bytes = 0;
+  Error err =
+    ctx->GetNextInput(
+      reinterpret_cast<uint8_t*>(contents), size * nmemb, &input_bytes);
+  if (!err.IsOk()) {
+    std::cerr << "RequestProvider: " << err << std::endl;
+    return CURL_READFUNC_ABORT;
+  }
+
+  return input_bytes;
+}
+
+size_t
+InferHttpContext::ResponseHeaderHandler(
+  void* contents, size_t size, size_t nmemb, void* userp)
+{
+  InferHttpContext* ctx = reinterpret_cast<InferHttpContext*>(userp);
+  char* buf = reinterpret_cast<char*>(contents);
+  size_t byte_size = size * nmemb;
+
+  size_t idx = strlen(kStatusHTTPHeader);
+  if ((idx < byte_size) &&
+      !strncasecmp(buf, kStatusHTTPHeader, idx)) {
+    while ((idx < byte_size) && (buf[idx] != ':')) {
+      ++idx;
+    }
+
+    if (idx < byte_size) {
+      std::string hdr(buf + idx + 1, byte_size - idx - 1);
+      if (!google::protobuf::TextFormat::ParseFromString(
+          hdr, &ctx->request_status_)) {
+        ctx->request_status_.Clear();
+      }
+    }
+  }
+
+  return byte_size;
+}
+
+size_t
+InferHttpContext::ResponseHandler(
+  void* contents, size_t size, size_t nmemb, void* userp)
+{
+  InferHttpContext* ctx = reinterpret_cast<InferHttpContext*>(userp);
+  size_t result_bytes = 0;
+
+  Error err =
+    ctx->SetNextRawResult(
+      reinterpret_cast<uint8_t*>(contents), size * nmemb, &result_bytes);
+  if (!err.IsOk()) {
+    std::cerr << "ResponseHandler: " << err << std::endl;
+    return 0;
+  }
+
+  return result_bytes;
+}
+
+//==============================================================================
+
+Error
+ProfileHttpContext::Create(
+  std::unique_ptr<ProfileContext>* ctx,
+  const std::string& server_url, bool verbose)
+{
+  ctx->reset(
+    static_cast<ProfileContext*>(
+      new ProfileHttpContext(server_url, verbose)));
+  return Error::Success;
+}
+
+ProfileHttpContext::ProfileHttpContext(
+  const std::string& server_url, bool verbose)
+  : ProfileContext(verbose), url_(server_url + "/" + kProfileRESTEndpoint)
+{
+}
+
+Error
+ProfileHttpContext::SendCommand(const std::string& cmd_str)
 {
   request_status_.Clear();
 
@@ -1213,23 +1319,11 @@ ProfileContext::SendCommand(const std::string& cmd_str)
   return Error(request_status_);
 }
 
-Error
-ProfileContext::StartProfile()
-{
-  return SendCommand("start");
-}
-
-Error
-ProfileContext::StopProfile()
-{
-  return SendCommand("stop");
-}
-
 size_t
-ProfileContext::ResponseHeaderHandler(
+ProfileHttpContext::ResponseHeaderHandler(
   void* contents, size_t size, size_t nmemb, void* userp)
 {
-  ProfileContext* ctx = reinterpret_cast<ProfileContext*>(userp);
+  ProfileHttpContext* ctx = reinterpret_cast<ProfileHttpContext*>(userp);
 
   char* buf = reinterpret_cast<char*>(contents);
   size_t byte_size = size * nmemb;
@@ -1252,6 +1346,238 @@ ProfileContext::ResponseHeaderHandler(
   }
 
   return byte_size;
+}
+
+//==============================================================================
+
+Error
+ServerStatusGrpcContext::Create(
+  std::unique_ptr<ServerStatusContext>* ctx,
+  const std::string& server_url, bool verbose)
+{
+  ctx->reset(
+    static_cast<ServerStatusContext*>(
+      new ServerStatusGrpcContext(server_url, verbose)));
+  return Error::Success;
+}
+
+Error
+ServerStatusGrpcContext::Create(
+  std::unique_ptr<ServerStatusContext>* ctx,
+  const std::string& server_url, const std::string& model_name, bool verbose)
+{
+  ctx->reset(
+    static_cast<ServerStatusContext*>(
+      new ServerStatusGrpcContext(server_url, model_name, verbose)));
+  return Error::Success;
+}
+
+ServerStatusGrpcContext::ServerStatusGrpcContext(
+  const std::string& server_url, bool verbose)
+  : ServerStatusContext(verbose), model_name_(""),
+    stub_(GRPCService::NewStub(GetChannel(server_url)))
+{
+}
+
+ServerStatusGrpcContext::ServerStatusGrpcContext(
+  const std::string& server_url, const std::string& model_name, bool verbose)
+  : ServerStatusContext(verbose), model_name_(model_name),
+    stub_(GRPCService::NewStub(GetChannel(server_url)))
+{
+}
+
+Error
+ServerStatusGrpcContext::GetServerStatus(ServerStatus* server_status)
+{
+  server_status->Clear();
+
+  Error grpc_status;
+
+  StatusRequest request;
+  StatusResponse response;
+  grpc::ClientContext context;
+
+  request.set_model_name(model_name_);
+  grpc::Status status = stub_->Status(&context, request, &response);
+  if (status.ok()) {
+    server_status->Swap(response.mutable_server_status());
+    grpc_status = Error(response.request_status());
+  } else {
+    // Something wrong with the gRPC conncection
+    grpc_status = Error(RequestStatusCode::INTERNAL, "gRPC client failed: " +
+      std::to_string(status.error_code()) + ": " + status.error_message());
+  }
+
+  // Log server status if request is SUCCESS and verbose is true.
+  if (grpc_status.Code() == RequestStatusCode::SUCCESS && verbose_) {
+    std::cout << server_status->DebugString() << std::endl;
+  }
+  return grpc_status;
+}
+
+//==============================================================================
+
+Error
+InferGrpcContext::Create(
+  std::unique_ptr<InferContext>* ctx, const std::string& server_url,
+  const std::string& model_name, int model_version, bool verbose)
+{
+  InferGrpcContext* ctx_ptr =
+      new InferGrpcContext(server_url, model_name, model_version, verbose);
+
+  // Get status of the model and create the inputs and outputs.
+  std::unique_ptr<ServerStatusContext> sctx;
+  Error err =
+    ServerStatusGrpcContext::Create(
+      &sctx, server_url, model_name, verbose);
+  if (err.IsOk()) {
+    ServerStatus server_status;
+    err = sctx->GetServerStatus(&server_status);
+    if (err.IsOk()) {
+      const auto& itr = server_status.model_status().find(model_name);
+      if (itr == server_status.model_status().end()) {
+        err =
+          Error(
+            RequestStatusCode::INTERNAL,
+            "unable to find status information for \"" + model_name + "\"");
+      } else {
+        const ModelConfig& model_info = itr->second.config();
+
+        ctx_ptr->max_batch_size_ =
+          static_cast<uint64_t>(std::max(0, model_info.max_batch_size()));
+
+        // Create inputs and outputs
+        for (const auto& io : model_info.input()) {
+          ctx_ptr->inputs_.emplace_back(std::make_shared<InputImpl>(io));
+        }
+        for (const auto& io : model_info.output()) {
+          ctx_ptr->outputs_.emplace_back(std::make_shared<OutputImpl>(io));
+        }
+      }
+    }
+  }
+
+  if (err.IsOk()) {
+    ctx->reset(static_cast<InferContext*>(ctx_ptr));
+  } else {
+    ctx->reset();
+  }
+
+  return err;
+}
+
+InferGrpcContext::InferGrpcContext(
+  const std::string& server_url, const std::string& model_name,
+  int model_version, bool verbose)
+  : InferContext(model_name, model_version, verbose),
+    stub_(GRPCService::NewStub(GetChannel(server_url)))
+{
+}
+
+Error
+InferGrpcContext::Run(std::vector<std::unique_ptr<Result>>* results)
+{
+  results->clear();
+
+  Error grpc_status;
+  InferResponseHeader infer_response;
+
+  PreRunProcessing();
+
+  InferRequest request;
+  InferResponse response;
+  grpc::ClientContext context;
+
+  request.set_model_name(model_name_);
+  request.set_version(std::to_string(model_version_));
+  request.mutable_meta_data()->MergeFrom(infer_request_);
+
+  while (input_pos_idx_ < inputs_.size()) {
+    InputImpl* io =
+      reinterpret_cast<InputImpl*>(inputs_[input_pos_idx_].get());
+    std::string* new_input = request.add_raw_input();
+    // Append all batches of one input together
+    for (size_t batch_idx = 0; batch_idx < batch_size_; batch_idx++) {
+      const uint8_t* data_ptr;
+      io->GetRaw(batch_idx, &data_ptr);
+      new_input->append(
+        reinterpret_cast<const char*>(data_ptr), io->ByteSize());
+    }
+    input_pos_idx_++;
+  }
+
+  grpc::Status status = stub_->Infer(&context, request, &response);
+  if (status.ok()) {
+    infer_response.Swap(response.mutable_meta_data());
+    request_status_.Swap(response.mutable_request_status());
+    // Reset position index for sanity check, this will be used
+    // in InferContext::SetNextRawResult
+    result_pos_idx_ = 0;
+    for (std::string output : response.raw_output()) {
+      size_t size = output.size();
+      size_t result_bytes = 0;
+      SetNextRawResult(
+        reinterpret_cast<uint8_t*>(&output[0]), size, &result_bytes);
+      if (result_bytes != size) {
+        grpc_status = Error(RequestStatusCode::INVALID,
+          "Written bytes doesn't match received bytes.");
+      }
+    }
+    grpc_status = Error(request_status_);
+  } else {
+    // Something wrong with the gRPC conncection
+    grpc_status = Error(RequestStatusCode::INTERNAL, "gRPC client failed: " +
+      std::to_string(status.error_code()) + ": " + status.error_message());
+  }
+
+  // Only continue to process result if gRPC status is SUCCESS
+  if (grpc_status.Code() != RequestStatusCode::SUCCESS) {
+    return grpc_status;
+  }
+
+  PostRunProcessing(infer_response);
+
+  results->swap(requested_results_);
+
+  return Error(request_status_);
+}
+
+//==============================================================================
+
+Error
+ProfileGrpcContext::Create(
+  std::unique_ptr<ProfileContext>* ctx,
+  const std::string& server_url, bool verbose)
+{
+  ctx->reset(
+    static_cast<ProfileContext*>(
+      new ProfileGrpcContext(server_url, verbose)));
+  return Error::Success;
+}
+
+ProfileGrpcContext::ProfileGrpcContext(
+  const std::string& server_url, bool verbose)
+  : ProfileContext(verbose),
+    stub_(GRPCService::NewStub(GetChannel(server_url)))
+{
+}
+
+Error
+ProfileGrpcContext::SendCommand(const std::string& cmd_str)
+{
+  ProfileRequest request;
+  ProfileResponse response;
+  grpc::ClientContext context;
+
+  request.set_cmd(cmd_str);
+  grpc::Status status = stub_->Profile(&context, request, &response);
+  if (status.ok()) {
+    return Error(response.request_status());
+  } else {
+    // Something wrong with the gRPC conncection
+    return Error(RequestStatusCode::INTERNAL, "gRPC client failed: " +
+      std::to_string(status.error_code()) + ": " + status.error_message());
+  }
 }
 
 }}} // namespace nvidia::inferenceserver::client

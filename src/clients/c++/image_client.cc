@@ -26,6 +26,7 @@
 
 #include "src/clients/c++/request.h"
 
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -45,6 +46,11 @@ enum ScaleType {
   NONE = 0,
   VGG = 1,
   INCEPTION = 2
+};
+
+enum ProtocolType {
+  HTTP = 0,
+  GRPC = 1
 };
 
 void
@@ -299,6 +305,8 @@ Usage(char** argv, const std::string& msg = std::string())
   std::cerr << "\t-m <model name>" << std::endl;
   std::cerr << "\t-x <model version>" << std::endl;
   std::cerr << "\t-u <URL for inference service>" << std::endl;
+  std::cerr << "\t-i <Protocol used to communicate with inference service>"
+    << std::endl;
   std::cerr << std::endl;
   std::cerr
     << "For -b, the image will be replicated and sent in a batch" << std::endl
@@ -317,6 +325,9 @@ Usage(char** argv, const std::string& msg = std::string())
     << "numbered version) of the model will be used." << std::endl;
   std::cerr
     << "For -u, the default server URL is localhost:8000." << std::endl;
+  std::cerr
+    << "For -i, available protocols are gRPC and HTTP. Default is HTTP."
+    << std::endl;
   std::cerr << std::endl;
 
   exit(1);
@@ -339,6 +350,26 @@ ParseScale(const std::string& str)
   exit(1);
 
   return ScaleType::NONE;
+}
+
+ProtocolType
+ParseProtocol(const std::string& str)
+{
+  std::string protocol(str);
+  std::transform(
+    protocol.begin(), protocol.end(), protocol.begin(), ::tolower);
+  if (protocol == "http") {
+    return ProtocolType::HTTP;
+  } else if (protocol == "grpc") {
+    return ProtocolType::GRPC;
+  }
+
+  std::cerr
+    << "unexpected protocol type \"" << str
+    << "\", expecting HTTP or gRPC" << std::endl;
+  exit(1);
+
+  return ProtocolType::HTTP;
 }
 
 bool
@@ -495,10 +526,11 @@ main(int argc, char** argv)
   std::string model_name;
   int model_version = -1;
   std::string url("localhost:8000");
+  ProtocolType protocol = ProtocolType::HTTP;
 
   // Parse commandline...
   int opt;
-  while ((opt = getopt(argc, argv, "vu:m:x:b:c:s:p:")) != -1) {
+  while ((opt = getopt(argc, argv, "vu:m:x:b:c:s:p:i:")) != -1) {
     switch (opt) {
       case 'v':
         verbose = true;
@@ -524,6 +556,9 @@ main(int argc, char** argv)
       case 'p':
         preprocess_output_filename = optarg;
         break;
+      case 'i':
+        protocol = ParseProtocol(optarg);
+        break;
       case '?':
         Usage(argv);
         break;
@@ -541,8 +576,14 @@ main(int argc, char** argv)
   // extract and validate that the model meets the requirements for
   // image classification.
   std::unique_ptr<nic::InferContext> ctx;
-  nic::Error err =
-    nic::InferContext::Create(&ctx, url, model_name, model_version, verbose);
+  nic::Error err;
+  if (protocol == ProtocolType::HTTP) {
+    err = nic::InferHttpContext::Create(
+      &ctx, url, model_name, model_version, verbose);
+  } else {
+    err = nic::InferGrpcContext::Create(
+      &ctx, url, model_name, model_version, verbose);
+  }
   if (!err.IsOk()) {
     std::cerr
       << "error: unable to create inference context: " << err << std::endl;

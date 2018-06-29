@@ -48,8 +48,8 @@ uint64_t ErrorRequestId(nic::Error* ctx);
 // ServerStatusContext
 typedef struct ServerStatusContextCtx ServerStatusContextCtx;
 nic::Error* ServerStatusContextNew(
-  ServerStatusContextCtx** ctx, const char* url, const char* model_name,
-  bool verbose);
+  ServerStatusContextCtx** ctx, const char* url, int protocol_int,
+  const char* model_name, bool verbose);
 void ServerStatusContextDelete(ServerStatusContextCtx* ctx);
 nic::Error* ServerStatusContextGetServerStatus(
   ServerStatusContextCtx* ctx, char** status, uint32_t* status_len);
@@ -58,8 +58,8 @@ nic::Error* ServerStatusContextGetServerStatus(
 // InferContext
 typedef struct InferContextCtx InferContextCtx;
 nic::Error* InferContextNew(
-  InferContextCtx** ctx, const char* url, const char* model_name,
-  int model_version, bool verbose);
+  InferContextCtx** ctx, const char* url, int protocol_int,
+  const char* model_name, int model_version, bool verbose);
 void InferContextDelete(InferContextCtx* ctx);
 nic::Error* InferContextSetOptions(
   InferContextCtx* ctx, nic::InferContext::Options* options);

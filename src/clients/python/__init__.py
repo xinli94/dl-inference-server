@@ -25,6 +25,7 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 from builtins import range
+from enum import IntEnum
 from future.utils import iteritems
 from ctypes import *
 import numpy as np
@@ -32,6 +33,20 @@ from numpy.ctypeslib import ndpointer
 import pkg_resources
 import inference_server.api.model_config_pb2
 from inference_server.api.server_status_pb2 import ServerStatus
+
+class ProtocolType(IntEnum):
+    HTTP = 0
+    GRPC = 1
+    @classmethod
+    def from_str(cls, value):
+        if value.lower() == 'http':
+            return ProtocolType.HTTP
+        elif value.lower() == 'grpc':
+            return ProtocolType.GRPC
+        raise Exception("unexpected protocol: " + value +
+                        ", expecting HTTP or gRPC")
+        return ProtocolType.HTTP
+
 
 class _utf8(object):
     @classmethod
@@ -66,7 +81,7 @@ _crequest_error_requestid.argtypes = [c_void_p]
 
 _crequest_status_ctx_new = _crequest.ServerStatusContextNew
 _crequest_status_ctx_new.restype = c_void_p
-_crequest_status_ctx_new.argtypes = [POINTER(c_void_p), _utf8, _utf8, c_bool]
+_crequest_status_ctx_new.argtypes = [POINTER(c_void_p), _utf8, c_int, _utf8, c_bool]
 _crequest_status_ctx_del = _crequest.ServerStatusContextDelete
 _crequest_status_ctx_del.argtypes = [c_void_p]
 _crequest_status_ctx_get = _crequest.ServerStatusContextGetServerStatus
@@ -75,7 +90,7 @@ _crequest_status_ctx_get.argtypes = [c_void_p, POINTER(c_char_p), POINTER(c_uint
 
 _crequest_infer_ctx_new = _crequest.InferContextNew
 _crequest_infer_ctx_new.restype = c_void_p
-_crequest_infer_ctx_new.argtypes = [POINTER(c_void_p), _utf8, _utf8, c_int, c_bool]
+_crequest_infer_ctx_new.argtypes = [POINTER(c_void_p), _utf8, c_int, _utf8, c_int, c_bool]
 _crequest_infer_ctx_del = _crequest.InferContextDelete
 _crequest_infer_ctx_del.argtypes = [c_void_p]
 _crequest_infer_ctx_set_options = _crequest.InferContextSetOptions
@@ -212,10 +227,13 @@ class ServerStatusContext:
     status for all models on the server or for a single model.
     """
 
-    def __init__(self, url, model_name=None, verbose=False):
+    def __init__(self, url, protocol, model_name=None, verbose=False):
         """Initialize the context.
 
         url - The inference server URL, e.g. localhost:8000.
+
+        protocol - The protocol used to communicate with the server
+        in the form of ProtocolType enumeration.
 
         model_name - The name of the model to get status for, or
         None to get status for all models.
@@ -226,7 +244,8 @@ class ServerStatusContext:
         self._ctx = c_void_p()
         _raise_if_error(
             c_void_p(
-                _crequest_status_ctx_new(byref(self._ctx), url, model_name, verbose)))
+                _crequest_status_ctx_new(
+                    byref(self._ctx), url, int(protocol), model_name, verbose)))
 
     def __del__(self):
         # when module is unloading may get called after
@@ -295,10 +314,13 @@ class InferContext:
         # are returned as an array of (index, value, label) tuples.
         CLASS = 2
 
-    def __init__(self, url, model_name, model_version=None, verbose=False):
+    def __init__(self, url, protocol, model_name, model_version=None, verbose=False):
         """Initialize the context.
 
         url - The inference server URL, e.g. localhost:8000.
+
+        protocol - The protocol used to communicate with the server
+        in the form of ProtocolType enumeration.
 
         model_name - The name of the model to use for inference.
 
@@ -317,7 +339,8 @@ class InferContext:
         _raise_if_error(
             c_void_p(
                 _crequest_infer_ctx_new(
-                    byref(self._ctx), url, model_name, imodel_version, verbose)))
+                    byref(self._ctx), url, int(protocol),
+                    model_name, imodel_version, verbose)))
 
     def __del__(self):
         # when module is unloading may get called after

@@ -30,44 +30,51 @@ import argparse
 import numpy as np
 from builtins import range
 from PIL import Image
-from inference_server.api import *
-import inference_server.api.model_config_pb2 as model_config
+
+import grpc
+# Drop "from src.core import" because the import hierarchy in proto files
+# will be removed in Makefile.clients
+import api_pb2
+import grpc_service_pb2
+import grpc_service_pb2_grpc
+import model_config_pb2
+import request_status_pb2
+import server_status_pb2
 
 FLAGS = None
 
 def model_dtype_to_np(model_dtype):
-    if model_dtype == model_config.TYPE_BOOL:
+    
+    if model_dtype == model_config_pb2.TYPE_BOOL:
         return np.bool
-    elif model_dtype == model_config.TYPE_INT8:
+    elif model_dtype == model_config_pb2.TYPE_INT8:
         return np.int8
-    elif model_dtype == model_config.TYPE_INT16:
+    elif model_dtype == model_config_pb2.TYPE_INT16:
         return np.int16
-    elif model_dtype == model_config.TYPE_INT32:
+    elif model_dtype == model_config_pb2.TYPE_INT32:
         return np.int32
-    elif model_dtype == model_config.TYPE_INT64:
+    elif model_dtype == model_config_pb2.TYPE_INT64:
         return np.int64
-    elif model_dtype == model_config.TYPE_UINT8:
+    elif model_dtype == model_config_pb2.TYPE_UINT8:
         return np.uint8
-    elif model_dtype == model_config.TYPE_UINT16:
+    elif model_dtype == model_config_pb2.TYPE_UINT16:
         return np.uint16
-    elif model_dtype == model_config.TYPE_FP16:
+    elif model_dtype == model_config_pb2.TYPE_FP16:
         return np.float16
-    elif model_dtype == model_config.TYPE_FP32:
+    elif model_dtype == model_config_pb2.TYPE_FP32:
         return np.float32
-    elif model_dtype == model_config.TYPE_FP64:
+    elif model_dtype == model_config_pb2.TYPE_FP64:
         return np.float64
     return None
 
-def parse_model(url, protocol, model_name, batch_size, verbose=False):
+def parse_model(status, model_name, batch_size, verbose=False):
     """
     Check the configuration of a model to make sure it meets the
     requirements for an image classification network (as expected by
     this client)
     """
-    ctx = ServerStatusContext(url, protocol, model_name, verbose)
-    server_status = ctx.get_server_status()
-
-    if model_name not in server_status.model_status:
+    server_status = status.server_status
+    if model_name not in server_status.model_status.keys():
         raise Exception("unable to get status for '" + model_name + "'")
 
     status = server_status.model_status[model_name]
@@ -81,10 +88,10 @@ def parse_model(url, protocol, model_name, batch_size, verbose=False):
     input = config.input[0]
     output = config.output[0]
 
-    if output.data_type != model_config.TYPE_FP32:
+    if output.data_type != model_config_pb2.TYPE_FP32:
         raise Exception("expecting output datatype to be TYPE_FP32, model '" +
                         model_name + "' output type is " +
-                        model_config.DataType.Name(output.data_type))
+                        model_config_pb2.DataType.Name(output.data_type))
 
     # Output is expected to be a vector. But allow any number of
     # dimensions as long as all but 1 is size 1 (e.g. { 10 }, { 1, 10
@@ -114,15 +121,15 @@ def parse_model(url, protocol, model_name, batch_size, verbose=False):
         raise Exception("expecting input to have 3 dimensions, model '" +
                         model_name + "' input has " << len(input.dims))
 
-    if ((input.format != model_config.ModelInput.FORMAT_NCHW) and
-        (input.format != model_config.ModelInput.FORMAT_NHWC)):
-        raise Exception("unexpected input format " + model_config.ModelInput.Format.Name(input.format) +
+    if ((input.format != model_config_pb2.ModelInput.FORMAT_NCHW) and
+        (input.format != model_config_pb2.ModelInput.FORMAT_NHWC)):
+        raise Exception("unexpected input format " + model_config_pb2.ModelInput.Format.Name(input.format) +
                         ", expecting " +
-                        model_config.ModelInput.Format.Name(model_config.ModelInput.FORMAT_NCHW) +
+                        model_config_pb2.ModelInput.Format.Name(model_config_pb2.ModelInput.FORMAT_NCHW) +
                         " or " +
-                        model_config.ModelInput.Format.Name(model_config.ModelInput.FORMAT_NHWC))
+                        model_config_pb2.ModelInput.Format.Name(model_config_pb2.ModelInput.FORMAT_NHWC))
 
-    if input.format == model_config.ModelInput.FORMAT_NHWC:
+    if input.format == model_config_pb2.ModelInput.FORMAT_NHWC:
         h = input.dims[0]
         w = input.dims[1]
         c = input.dims[2]
@@ -131,7 +138,12 @@ def parse_model(url, protocol, model_name, batch_size, verbose=False):
         h = input.dims[1]
         w = input.dims[2]
 
-    return (input.name, output.name, c, h, w, input.format, model_dtype_to_np(input.data_type))
+    output_size = 1
+    for dim in output.dims:
+        output_size = output_size * dim
+    output_size = output_size * np.dtype(model_dtype_to_np(output.data_type)).itemsize
+
+    return (input.name, output.name, c, h, w, input.format, model_dtype_to_np(input.data_type), output_size)
 
 def preprocess(img, format, dtype, c, h, w, scaling):
     """
@@ -163,7 +175,7 @@ def preprocess(img, format, dtype, c, h, w, scaling):
         scaled = typed
 
     # Swap to CHW if necessary
-    if format == model_config.ModelInput.FORMAT_NCHW:
+    if format == model_config_pb2.ModelInput.FORMAT_NCHW:
         ordered = np.transpose(scaled, (2, 0, 1))
     else:
         ordered = scaled
@@ -182,11 +194,12 @@ def postprocess(results, batch_size, num_classes, verbose=False):
         print("Output probabilities:")
 
     if len(results) != 1:
-        raise Exception("expected 1 result, got " + len(results))
+        raise Exception("expected 1 result, got " + str(len(results)))
 
-    result = list(results.values())[0]
+    result = results[0].batch_classes
     if len(result) != batch_size:
-        raise Exception("expected " + batch_size + " results, got " + len(result))
+        raise Exception("expected " + str(batch_size) +
+            " results, got " + str(len(result)))
 
     # For each result in the batch count the top prediction. Since we
     # used the same image for every entry in the batch we expect the
@@ -195,23 +208,23 @@ def postprocess(results, batch_size, num_classes, verbose=False):
     counts = dict()
     predictions = dict()
     for (batch_index, batch_result) in enumerate(result):
-        label = batch_result[0][2]
+        label = batch_result.cls[0].label
         if label not in counts:
             counts[label] = 0
 
         counts[label] += 1
-        predictions[label] = batch_result[0]
+        predictions[label] = batch_result.cls[0]
 
         # If requested, print all the class results for the entry
         if show_all:
-            for cls in batch_result:
-                print("batch {}: {} ({}) = {}".format(batch_index, cls[0], cls[2], cls[1]))
+            for cls in batch_result.cls:
+                print("batch {}: {} ({}) = {}".format(batch_index, cls.idx, cls.label, cls.value))
 
     # Summary
     print("Prediction totals:")
     for (label, cnt) in counts.items():
         cls = predictions[label]
-        print("\tcnt={}\t({}) {}".format(cnt, cls[0], cls[2]))
+        print("\tcnt={}\t({}) {}".format(cnt, cls.idx, cls.label))
 
 
 if __name__ == '__main__':
@@ -229,24 +242,26 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--scaling', type=str, choices=['NONE', 'INCEPTION', 'VGG'],
                         required=False, default='NONE',
                         help='Type of scaling to apply to image pixels. Default is NONE.')
-    parser.add_argument('-u', '--url', type=str, required=False, default='localhost:8000',
-                        help='Inference server URL. Default is localhost:8000.')
-    parser.add_argument('-i', '--protocol', type=str, required=False, default='HTTP',
-                        help='Protocol (HTTP/gRPC) used to ' + 
-                        'communicate with inference service. Default is HTTP.')
+    parser.add_argument('-u', '--url', type=str, required=False, default='localhost:8001',
+                        help='Inference server URL. Default is localhost:8001.')
     parser.add_argument('-p', '--preprocessed', type=str, required=False,
                         metavar='FILE', help='Write preprocessed image to specified file.')
     parser.add_argument('image_filename', type=str, nargs='?', default=None,
                         help='Input image.')
     FLAGS = parser.parse_args()
 
-    protocol = ProtocolType.from_str(FLAGS.protocol)
+    # Create gRPC stub for communicating with the server
+    channel = grpc.insecure_channel(FLAGS.url)
+    grpc_stub = grpc_service_pb2_grpc.GRPCServiceStub(channel)
 
+    # Prepare request for Status gRPC
+    request = grpc_service_pb2.StatusRequest(model_name=FLAGS.model_name)
+    # Call and receive response from Status gRPC
+    response = grpc_stub.Status(request)
     # Make sure the model matches our requirements, and get some
     # properties of the model that we need for preprocessing
-    input_name, output_name, c, h, w, format, dtype = parse_model(
-        FLAGS.url, protocol, FLAGS.model_name,
-        FLAGS.batch_size, FLAGS.verbose)
+    input_name, output_name, c, h, w, format, dtype, output_size = parse_model(
+        response, FLAGS.model_name, FLAGS.batch_size, FLAGS.verbose)
 
     # Load and preprocess the image
     img = Image.open(FLAGS.image_filename)
@@ -256,14 +271,28 @@ if __name__ == '__main__':
         with open(preprocessed, "w") as file:
             file.write(input_tensor.tobytes())
 
+    # Prepare request for Infer gRPC
+    request = grpc_service_pb2.InferRequest()
+    request.model_name = FLAGS.model_name
+    if FLAGS.model_version is None:
+        FLAGS.model_version = "" # using lastest version
+    request.version = FLAGS.model_version
+    request.meta_data.batch_size = FLAGS.batch_size
+    request.meta_data.input.add(
+        name=input_name, byte_size=input_tensor.size * input_tensor.itemsize)
+    output_message = api_pb2.InferRequestHeader.Output()
+    output_message.name = output_name
+    output_message.byte_size = output_size
+    output_message.cls.count = FLAGS.classes
+    request.meta_data.output.extend([output_message])
     # Need 'batch_size' copies of the input tensor...
-    input_tensors = [input_tensor for b in range(FLAGS.batch_size)]
+    input_bytes = input_tensor.tobytes()
+    for b in range(FLAGS.batch_size-1):
+        input_bytes += input_tensor.tobytes()
+    request.raw_input.extend([input_bytes])
 
-    ctx = InferContext(FLAGS.url, protocol,
-        FLAGS.model_name, FLAGS.model_version, FLAGS.verbose)
-    results = ctx.run(
-        { input_name : input_tensors },
-        { output_name : (InferContext.ResultFormat.CLASS, FLAGS.classes) },
-        FLAGS.batch_size)
+    # Call and receive response from Infer gRPC
+    response = grpc_stub.Infer(request)
+    print(response.request_status)
 
-    postprocess(results, FLAGS.batch_size, FLAGS.classes, FLAGS.verbose)
+    postprocess(response.meta_data.output, FLAGS.batch_size, FLAGS.classes, FLAGS.verbose)

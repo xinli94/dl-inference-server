@@ -35,12 +35,21 @@ RUN apt-get update && \
     add-apt-repository -y ppa:maarten-fonville/protobuf && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
+            autoconf \
+            automake \
             build-essential \
+            clang \
             curl \
+            git \
+            libc++-dev \
             libcurl3-dev \
+            libgflags-dev \
+            libgtest-dev \
             libopencv-dev \
             libopencv-core-dev \
             libprotobuf-dev \
+            libtool \
+            pkg-config \
             protobuf-compiler \
             python$PYVER \
             python$PYVER-dev && \
@@ -56,7 +65,14 @@ RUN curl -O https://bootstrap.pypa.io/get-pip.py && \
     python$PYVER get-pip.py && \
     rm get-pip.py
 
-RUN pip install --upgrade setuptools
+RUN pip install --upgrade setuptools grpcio-tools
+
+# Clients and examples require gRPC
+WORKDIR /opt
+RUN git clone -b $(curl -L https://grpc.io/release) https://github.com/grpc/grpc && \
+    cd grpc && \
+    git submodule update --checkout --init && \
+    make -j"$(nproc)" && make -j"$(nproc)" install
 
 WORKDIR /workspace
 COPY . .

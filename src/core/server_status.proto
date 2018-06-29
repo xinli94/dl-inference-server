@@ -41,19 +41,37 @@ message StatDuration {
 
 // Stats collected for Status requests.
 message StatusRequestStats {
+  // Total time required to service api/status requests, not including
+  // HTTP or gRPC endpoint termination time.
   StatDuration success = 1;
 }
 
 // Stats collected for Profile requests.
 message ProfileRequestStats {
+  // Total time required to service profile requests, not including
+  // HTTP or gRPC endpoint termination time.
   StatDuration success = 1;
 }
 
 // Stats collected for Infer requests.
 message InferRequestStats {
+  // Total time required to service successful inference requests,
+  // not including HTTP or gRPC endpoint termination time.
   StatDuration success = 1;
+
+  // Total time required to service failed inference requests, not
+  // including HTTP or gRPC endpoint termination time.
   StatDuration failed = 2;
+
+  // Time required to run inferencing including time waiting for an
+  // available model instance, time copying input tensors to GPU
+  // memory, time executing the model, and time copying output tensors
+  // from GPU memory. Wait time is also captured separately 'run_wait'
+  // so to get inferencing time not including wait time use 'run' -
+  // 'run_wait'.
   StatDuration run = 3;
+
+  // Time waiting for an available model instance.
   StatDuration run_wait = 4;
 }
 
