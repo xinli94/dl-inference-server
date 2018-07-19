@@ -48,11 +48,35 @@ is also available for inference server issues and questions.
 
 ## Building the Clients
 
-A Dockerfile is provided for building the client libraries and
-examples. Instead of building with docker you can instead follow the
-build steps outlined in the Dockerfile on your local system. The build
-assumes a Ubuntu 16.04 system and so may require modification for
-other distributions.
+Before building the client libraries and applications you must first
+install some prerequisites. The following instructions assume Ubuntu
+16.04. OpenCV is used by image\_client to preprocess images before
+sending them to the inference server for inferencing. The python-pil
+package is required by the Python image\_client example.
+
+    sudo apt-get update
+    sudo apt-get install build-essential libcurl3-dev libopencv-dev libopencv-core-dev python-pil \
+                         software-properties-common autoconf automake libtool pkg-config
+    
+Creating the whl file for the Python client library requires setuptools. 
+And grpcio-tools is required for gRPC support in Python client library.
+
+    pip install --no-cache-dir --upgrade setuptools grpcio-tools
+
+With those prerequisites installed, the C++ and Python client libraries
+and example image\_client and perf\_client applications can be built:
+
+    make -f Makefile.clients all pip
+
+Build artifacts are in build/.  The Python whl file is generated in
+build/dist/dist/ and can be installed with a command like the following:
+
+    pip install --no-cache-dir --upgrade build/dist/dist/inference_server-1.0.0-cp27-cp27mu-linux_x86_64.whl
+
+## Building the Clients with Docker
+
+A Dockerfile is provided for building the client libraries and examples 
+inside a container. 
 
 Before building, edit the Dockerfile to set PYVER to either 2.7 or 3.5
 to select the version of Python that you will be using. The following
@@ -63,28 +87,16 @@ wheel file for the Python client library.
 
 The easiest way to extract the built libraries and examples from the
 docker image is to mount a host driver into the container and then
-copy the images. Examples also require that you have libgrpc++.so.1
-and libgrpc.so.6 available on your host. If you have a recent
-distribution you can likely install these with your package manager,
-but for Ubuntu 16.04 they can be copied from the container.
+copy the images.
 
     $ docker run --rm -it -v /tmp:/tmp/host inference_server_clients
     # cp build/image_client /tmp/host/.
     # cp build/perf_client /tmp/host/.
     # cp build/dist/dist/inference_server-*.whl /tmp/host/.
-    # cp /usr/local/lib/libgrpc.so.6 /tmp/host/.
-    # cp /usr/local/lib/libgrpc++.so.1 /tmp/host/.
 
 You can now access image\_client and perf\_client from /tmp on the
 host system. Before running the C++ or Python examples on the host the
-appropriate dependencies must be installed. Protobuf3 support is
-required. For Ubuntu 16.04 this must be installed from a ppa but if
-you are using a more recent distribution this step might not be
-necessary.
-
-    $ sudo add-apt-repository ppa:maarten-fonville/protobuf
-    $ sudo apt-get update
-    $ sudo apt-get install libprotobuf-dev
+appropriate dependencies must be installed. 
 
 OpenCV is used by the C++ image\_client example to preprocess images
 before sending them to the inference server for inferencing.
