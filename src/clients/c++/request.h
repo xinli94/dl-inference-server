@@ -93,6 +93,51 @@ private:
 };
 
 //==============================================================================
+// ServerHealthContext
+//
+// A ServerHealthContext object is used to query an inference server
+// for health information.s Once created a ServerHealthContext object
+// can be used repeatedly to get health from the server.  A
+// ServerHealthContext object can use either HTTP protocol or gRPC
+// protocol depending on the Create function
+// (ServerHealthHttpContext::Create or
+// ServerHealthGrpcContext::Create). For example:
+//
+//   std::unique_ptr<ServerHealthContext> ctx;
+//   ServerHealthHttpContext::Create(&ctx, "localhost:8000");
+//   bool ready;
+//   ctx->GetReady(&ready);
+//   ...
+//   bool live;
+//   ctx->GetLive(&live);
+//   ...
+//
+// Thread-safety:
+//   ServerHealthContext::Create methods are thread-safe.
+//   GetReady() and GetLive() are not thread-safe. For a given
+//   ServerHealthContext, calls to GetReady() and GetLive() must be
+//   serialized.
+//
+class ServerHealthContext {
+public:
+  // Contact the inference server and get readiness
+  // @param ready - returns the readiness
+  // @return Error object indicating success or failure
+  virtual Error GetReady(bool* ready) = 0;
+
+  // Contact the inference server and get liveness
+  // @param live - returns the liveness
+  // @return Error object indicating success or failure
+  virtual Error GetLive(bool* live) = 0;
+
+protected:
+  ServerHealthContext(bool);
+
+  // If true print verbose output
+  const bool verbose_;
+};
+
+//==============================================================================
 // ServerStatusContext
 //
 // A ServerStatusContext object is used to query an inference server
@@ -377,6 +422,30 @@ public:
       const std::shared_ptr<InferContext::Output>& output, uint64_t k) = 0;
 };
 
+  //==============
+  // Stat
+  // Struct contains cumulative statistic of the InferContext
+  // Note: for gRPC protocol,
+  //   'cumulative_send_time_ns' represent the time for
+  //   marshalling infer request.
+  //   'cumulative_receive_time_ns' represent the time for
+  //   unmarshalling infer response.
+  struct Stat {
+    // Total number of request completed
+    size_t completed_request_count;
+    // Time from the request start until the response is completely received
+    uint64_t cumulative_total_request_time_ns;
+    // Time from the request start until the last byte is sent
+    uint64_t cumulative_send_time_ns;
+    // Time from receiving first byte of the response until the response
+    // is completely received
+    uint64_t cumulative_receive_time_ns;
+
+    Stat()
+     : completed_request_count(0), cumulative_total_request_time_ns(0),
+       cumulative_send_time_ns(0), cumulative_receive_time_ns(0) {}
+  };
+
 public:
   // @return the model name being used for inference.
   const std::string& ModelName() const { return model_name_; }
@@ -427,7 +496,45 @@ public:
   // @return Error object indicating success or failure
   virtual Error Run(std::vector<std::unique_ptr<Result>>* results) = 0;
 
+  // Get the current statistic of the InferContext. For gRPC protocol, only
+  // the completed request count and cumulative process time is being measured.
+  // @parm stat - returns Stat objects holding InferContext statistic.
+  // @return Error object indicating success or failure
+  Error GetStat(Stat* stat);
+
 protected:
+  //==============
+  // RequestTimers
+  // Timer to record the time for different request stages
+  class RequestTimers {
+  public:
+    enum Kind {
+      REQUEST_START,
+      REQUEST_END,
+      SEND_START,
+      SEND_END,
+      RECEIVE_START,
+      RECEIVE_END
+    };
+
+    RequestTimers();
+
+    // Reset the timer values to 0. Should always be called before re-using
+    // the timer
+    Error Reset();
+
+    // Record the current timestamp for the request stage specified by 'kind'
+    Error Record(Kind kind);
+  private:
+    friend class InferContext;
+    struct timespec request_start_;
+    struct timespec request_end_;
+    struct timespec send_start_;
+    struct timespec send_end_;
+    struct timespec receive_start_;
+    struct timespec receive_end_;
+  };
+
   InferContext(const std::string&, int, bool);
 
   // Helper function called before inference to reset position indicators
@@ -446,6 +553,9 @@ protected:
   // 'buf'. Return the actual amount copied in 'result_<bytes'.
   Error SetNextRawResult(
     const uint8_t* buf, size_t size, size_t* result_bytes);
+
+  // Update the context stat with the given timer
+  Error UpdateStat(const RequestTimers& timer);
 
   // Model name
   const std::string model_name_;
@@ -491,6 +601,14 @@ protected:
   // request and receiving response.
   size_t input_pos_idx_;
   size_t result_pos_idx_;
+
+  // The statistic of the current context
+  Stat context_stat_;
+
+  // The timer for infer request
+  // When asynchronous request is implemented where there will be RequestContext
+  // object for each request, move RequestTimers into RequestContext.
+  RequestTimers request_timer_;
 };
 
 //==============================================================================
@@ -531,6 +649,39 @@ protected:
 
   // If true print verbose output
   const bool verbose_;
+};
+
+//==============================================================================
+// ServerHealthHttpContext
+//
+// A ServerHealthHttpContext object is the HTTP instantiation of the
+// ServerHealthContext class, please refer ServerHealthContext class
+// for detail usage.
+//
+class ServerHealthHttpContext : public ServerHealthContext {
+public:
+  // Create context that returns health information.
+  // @param ctx - returns the new ServerHealthHttpContext object
+  // @param server_url - inference server name and port
+  // @param verbose - if true generate verbose output when contacting
+  // the inference server
+  // @return Error object indicating success or failure.
+  static Error Create(
+    std::unique_ptr<ServerHealthContext>* ctx,
+    const std::string& server_url, bool verbose = false);
+
+  // @see ServerHealthContext::GetReady
+  Error GetReady(bool* ready) override;
+
+  // @see ServerHealthContext::GetLive
+  Error GetLive(bool* live) override;
+
+private:
+  ServerHealthHttpContext(const std::string&, bool);
+  Error GetHealth(const std::string& url, bool* health);
+
+  // URL for health endpoint on inference server.
+  const std::string url_;
 };
 
 //==============================================================================
@@ -597,6 +748,8 @@ private:
 //
 class InferHttpContext : public InferContext {
 public:
+    ~InferHttpContext();
+
   // Create context that performs inference for a model using HTTP protocol.
   // @param ctx - returns the new InferHttpContext object
   // @param server_url - inference server name and port
@@ -634,6 +787,9 @@ private:
 
   // Serialized InferRequestHeader
   std::string infer_request_str_;
+
+  // Keep an easy handle alive to reuse the connection
+  CURL* curl_;
 };
 
 //==============================================================================
@@ -669,6 +825,39 @@ private:
 };
 
 //==============================================================================
+// ServerHealthGrpcContext
+//
+// A ServerHealthGrpcContext object is the gRPC instantiation of
+// the ServerHealthContext class, please refer ServerHealthContext class for
+// detail usage.
+//
+class ServerHealthGrpcContext : public ServerHealthContext {
+public:
+  // Create context that returns health information about server.
+  // @param ctx - returns the new ServerHealthGrpcContext object
+  // @param server_url - inference server name and port
+  // @param verbose - if true generate verbose output when contacting
+  // the inference server
+  // @return Error object indicating success or failure.
+  static Error Create(
+    std::unique_ptr<ServerHealthContext>* ctx,
+    const std::string& server_url, bool verbose = false);
+
+  // @see ServerHealthContext::GetReady
+  Error GetReady(bool* ready) override;
+
+  // @see ServerHealthContext::GetLive
+  Error GetLive(bool* live) override;
+
+private:
+  ServerHealthGrpcContext(const std::string&, bool);
+  Error GetHealth(const std::string& mode, bool* health);
+
+  // gRPC end point.
+  std::unique_ptr<GRPCService::Stub> stub_;
+};
+
+//==============================================================================
 // ServerStatusGrpcContext
 //
 // A ServerStatusGrpcContext object is the gRPC instantiation of
@@ -685,7 +874,7 @@ public:
   // the inference server
   // @return Error object indicating success or failure.
   static Error Create(
-    std::unique_ptr<ServerStatusContext>* ctx, 
+    std::unique_ptr<ServerStatusContext>* ctx,
     const std::string& server_url, bool verbose = false);
 
   // Create context that returns information about server and one
@@ -714,7 +903,7 @@ private:
   const std::string model_name_;
 
   // gRPC end point.
-  std::unique_ptr<GRPCService::Stub> stub_; 
+  std::unique_ptr<GRPCService::Stub> stub_;
 };
 
 //==============================================================================
@@ -755,7 +944,7 @@ private:
     const std::string&, const std::string&, int, bool);
 
   // gRPC end point.
-  std::unique_ptr<GRPCService::Stub> stub_; 
+  std::unique_ptr<GRPCService::Stub> stub_;
 };
 
 //==============================================================================
@@ -782,7 +971,7 @@ private:
   Error SendCommand(const std::string& cmd_str) override;
 
   // gRPC end point.
-  std::unique_ptr<GRPCService::Stub> stub_; 
+  std::unique_ptr<GRPCService::Stub> stub_;
 };
 
 //==============================================================================

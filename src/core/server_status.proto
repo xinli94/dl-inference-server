@@ -53,6 +53,13 @@ message ProfileRequestStats {
   StatDuration success = 1;
 }
 
+// Stats collected for Health requests.
+message HealthRequestStats {
+  // Total time required to service health requests, not including
+  // HTTP or gRPC endpoint termination time.
+  StatDuration success = 1;
+}
+
 // Stats collected for Infer requests.
 message InferRequestStats {
   // Total time required to service successful inference requests,
@@ -136,4 +143,7 @@ message ServerStatus {
 
   // Statistics for Profile requests.
   ProfileRequestStats profile_stats = 6;
+
+  // Statistics for Health requests.
+  HealthRequestStats health_stats = 8;
 }

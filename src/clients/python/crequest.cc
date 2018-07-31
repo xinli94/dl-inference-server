@@ -70,7 +70,7 @@ ErrorRequestId(nic::Error* ctx)
 
 //==============================================================================
 namespace {
-  
+
 enum ProtocolType {
   HTTP = 0,
   GRPC = 1
@@ -91,6 +91,68 @@ ParseProtocol(ProtocolType* protocol, const int protocol_int)
 }
 
 } // namespace
+
+//==============================================================================
+struct ServerHealthContextCtx {
+  std::unique_ptr<nic::ServerHealthContext> ctx;
+};
+
+nic::Error* ServerHealthContextNew(
+  ServerHealthContextCtx** ctx, const char* url, int protocol_int,
+  bool verbose)
+{
+  nic::Error err;
+  ProtocolType protocol;
+  err = ParseProtocol(&protocol, protocol_int);
+  if (err.IsOk()) {
+    ServerHealthContextCtx* lctx = new ServerHealthContextCtx;
+    if (protocol == ProtocolType::HTTP) {
+      err = nic::ServerHealthHttpContext::Create(
+        &(lctx->ctx), std::string(url), verbose);
+    } else {
+      err = nic::ServerHealthGrpcContext::Create(
+        &(lctx->ctx), std::string(url), verbose);
+    }
+
+    if (err.IsOk()) {
+      *ctx = lctx;
+      return nullptr;
+    }
+
+    delete lctx;
+  }
+
+  *ctx = nullptr;
+  return new nic::Error(err);
+}
+
+void
+ServerHealthContextDelete(ServerHealthContextCtx* ctx)
+{
+  delete ctx;
+}
+
+nic::Error* ServerHealthContextGetReady(
+  ServerHealthContextCtx* ctx, bool* ready)
+{
+  nic::Error err = ctx->ctx->GetReady(ready);
+  if (err.IsOk()) {
+    return nullptr;
+  }
+
+  return new nic::Error(err);
+}
+
+nic::Error* ServerHealthContextGetLive(
+  ServerHealthContextCtx* ctx, bool* live)
+{
+  nic::Error err = ctx->ctx->GetLive(live);
+  if (err.IsOk()) {
+    return nullptr;
+  }
+
+  return new nic::Error(err);
+}
 
 //==============================================================================
 struct ServerStatusContextCtx {
@@ -132,7 +194,7 @@ ServerStatusContextNew(
       *ctx = lctx;
       return nullptr;
     }
-    // delete the newed struct if Create() failed
+
     delete lctx;
   }
 

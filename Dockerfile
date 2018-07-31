@@ -59,6 +59,6 @@ RUN curl -O https://bootstrap.pypa.io/get-pip.py && \
 RUN pip install --upgrade setuptools grpcio-tools
 
 WORKDIR /workspace
-COPY . .
+COPY Makefile.clients .
+COPY src src
 RUN make -j4 -f Makefile.clients all pip
-

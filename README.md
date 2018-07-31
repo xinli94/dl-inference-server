@@ -44,7 +44,7 @@ is also available for inference server issues and questions.
  container release.
 
 **yy.mm**: Branch compatible with Inference Server yy.mm, for
-  example *18.07*.
+  example *18.08*.
 
 ## Building the Clients
 
@@ -71,7 +71,7 @@ and example image\_client and perf\_client applications can be built:
 Build artifacts are in build/.  The Python whl file is generated in
 build/dist/dist/ and can be installed with a command like the following:
 
-    pip install --no-cache-dir --upgrade build/dist/dist/inference_server-0.4.0-cp27-cp27mu-linux_x86_64.whl
+    pip install --no-cache-dir --upgrade build/dist/dist/inference_server-0.5.0-cp27-cp27mu-linux_x86_64.whl
 
 ## Building the Clients with Docker
 
@@ -94,23 +94,8 @@ copy the images.
     # cp build/perf_client /tmp/host/.
     # cp build/dist/dist/inference_server-*.whl /tmp/host/.
 
-You can now access image\_client and perf\_client from /tmp on the
-host system. Before running the C++ or Python examples on the host the
-appropriate dependencies must be installed.
-
-OpenCV is used by the C++ image\_client example to preprocess images
-before sending them to the inference server for inferencing.
-
-    $ sudo apt-get install libcurl3-dev libopencv-dev libopencv-core-dev
-
-The Python whl file can be installed using pip:
-
-    $ pip install --no-cache-dir --upgrade /tmp/inference_server-0.4.0-cp27-cp27mu-linux_x86_64.whl
-
-The Python image\_client example requires Pillow for image processing
-so install that package before running.
-
-    $ pip install --no-cache-dir --upgrade pillow
+You can now access image\_client, perf\_client and the wheel file from /tmp on the
+host system.
 
 ## Image Classification Example
 
@@ -139,7 +124,7 @@ Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html)
 launch the inference server container pointing to that model
 store. For example:
 
-    $ nvidia-docker run --rm -p8000:8000 -p8001:8001 -v/path/to/dl-inference-server/examples/models:/models nvcr.io/nvidia/inferenceserver:18.07-py2 inference_server --model-store=/models
+    $ nvidia-docker run --rm -p8000:8000 -p8001:8001 -v/path/to/dl-inference-server/examples/models:/models nvcr.io/nvidia/inferenceserver:18.08-py2 inference_server --model-store=/models
 
 Make sure you choose the most recent version of
 nvcr.io/nvidia/inferenceserver. Port 8000 exposes the inference server
@@ -200,7 +185,8 @@ the inference server.
 ## Perf Example
 
 The perf\_client example uses the C++ client API to send concurrent
-requests to the inference server. After building as described above,
+requests to the inference server to measure latency and inferences per
+second under varying client loads.  After building as described above,
 the executable is available at build/perf\_client.
 
 You can use perf\_client with any kind of model. It sends random data
@@ -217,7 +203,7 @@ Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html)
 launch the inference server container pointing to that model
 store. For example:
 
-    $ nvidia-docker run --rm -p8000:8000 -p8001:8001 -v/path/to/dl-inference-server/examples/models:/models nvcr.io/nvidia/inferenceserver:18.07-py2 inference_server --model-store=/models
+    $ nvidia-docker run --rm -p8000:8000 -p8001:8001 -v/path/to/dl-inference-server/examples/models:/models nvcr.io/nvidia/inferenceserver:18.08-py2 inference_server --model-store=/models
 
 Make sure you choose the most recent version of
 nvcr.io/nvidia/inferenceserver. Port 8000 exposes the inference server
@@ -225,58 +211,107 @@ HTTP endpoint and port 8001 exposes the gRPC endpoint. Replace
 /path/to/dl-inference-server/examples/models with the corresponding
 path in your local clone of this repo.
 
-You can use the --help flag to see all perf\_client command-line
-options. You vary thread count (-t) to control concurrency. Use
-warmup-passes (-w) to avoid start-up overhead and measurement-passes
-(-p) to control the length of the run. For example,
+The perf\_client example has two major modes. In the first mode you
+specify how many concurrent clients you want to simulate and
+perf\_client finds a stable latency and inferences/second for that
+level of concurrency. Use the -t flag to control concurrency and -v to
+see verbose output. For example, to simulate four clients continuously
+sending requests to the inference server use the following
+command-line.
 
-    $ perf_client -m resnet50_netdef -t4 -w5 -p100
-    *** Warming up ***
-    *** Begin ***
-    *** End ***
-    *** Results ***
-    Thread count: 4
-    Batch size: 1
-    Server:
-      Inference count: 400
-      Cumulative Time: 3900472 usec (avg 9751 usec)
-        Run Wait: 387484 usec (avg 968 usec)
-        Run: 3489622 usec (avg 8724 usec)
-    Client:
-      Inference count: 400
-      Total Time: 3085831 usec
-      Throughput: 129 infer/sec
+    $ perf_client -m resnet50_netdef -p3000 -t4 -v
+    *** Measurement Settings ***
+      Batch size: 1
+      Measurement window: 3000 msec
 
-The results give timing as seen by the server and from the client. In
-this case we see 4 threads each did 100 measurement passes for a total
-of 400 inferences using the Caffe2 ResNet50 model. The server results
-tell us that on average each inference took 9751 usecs. Of that an
-average of 968 usecs was waiting on an in-progress inference and the
-other 8724 usecs was the actual time to execute the model.
+    Request concurrency: 4
+      Pass [1] throughput: 238 infer/sec. Avg latency: 16767 usec (std 7150 usec)
+      Pass [2] throughput: 238 infer/sec. Avg latency: 16781 usec (std 7176 usec)
+      Pass [3] throughput: 238 infer/sec. Avg latency: 16751 usec (std 7192 usec)
+      Client:
+        Request count: 716
+        Throughput: 238 infer/sec
+        Avg latency: 16751 usec (standard deviation 7192 usec)
+        Avg HTTP time: 16731 usec (send 723 usec + response wait 15982 usec + receive 26 usec)
+      Server:
+        Request count: 862
+        Avg request latency: 14377 usec (overhead 273 usec + wait 6502 usec + compute 7602 usec)
 
-By increasing concurrency (-t) and batch size (-b) we can trade off
-higher throughput for increased per-inference latency. For example,
+In the second mode perf\_client will generate a inferences/second
+vs. latency curve by increasing concurrency until a specificy latency
+limit is reached. This mode is enabled by using the -d option and -l
+to specify the latency limit.
 
-    $ build/perf_client -m resnet50_netdef -t16 -b64 -w5 -p100
-    *** Warming up ***
-    *** Begin ***
-    *** End ***
-    *** Results ***
-    Thread count: 16
-    Batch size: 64
-    Server:
-      Inference count: 102400
-      Cumulative Time: 1241498216 usec (avg 12124 usec)
-        Run Wait: 1089736082 usec (avg 10641 usec)
-        Run: 151584509 usec (avg 1480 usec)
-    Client:
-      Inference count: 102400
-      Total Time: 86234614 usec
-      Throughput: 1187 infer/sec
+    $ perf_client -m resnet50_netdef -p3000 -d -l15
+    *** Measurement Settings ***
+      Batch size: 1
+      Measurement window: 3000 msec
+      Latency limit: 15 msec
 
-With 16 threads and a batch size of 64 the throughput (inferences per
-second) increases significantly, but at the expense of an increase in
-wait time (10641 usecs) and thus latency for any individual inference.
+    Request concurrency: 1
+      Client:
+        Request count: 278
+        Throughput: 92 infer/sec
+        Avg latency: 10773 usec (standard deviation 609 usec)
+        Avg HTTP time: 10736 usec (send/recv 778 usec + response wait 9958 usec)
+      Server:
+        Request count: 335
+        Avg request latency: 7976 usec (overhead 187 usec + wait 0 usec + compute 7789 usec)
+
+    Request concurrency: 2
+      Client:
+        Request count: 573
+        Throughput: 191 infer/sec
+        Avg latency: 10471 usec (standard deviation 837 usec)
+        Avg HTTP time: 10436 usec (send/recv 852 usec + response wait 9584 usec)
+      Server:
+        Request count: 690
+        Avg request latency: 7403 usec (overhead 238 usec + wait 11 usec + compute 7154 usec)
+
+    Request concurrency: 3
+      Client:
+        Request count: 771
+        Throughput: 257 infer/sec
+        Avg latency: 11659 usec (standard deviation 2435 usec)
+        Avg HTTP time: 11625 usec (send/recv 846 usec + response wait 10779 usec)
+      Server:
+        Request count: 928
+        Avg request latency: 9466 usec (overhead 235 usec + wait 1946 usec + compute 7285 usec)
+
+    Request concurrency: 4
+      Client:
+        Request count: 715
+        Throughput: 238 infer/sec
+        Avg latency: 16753 usec (standard deviation 7142 usec)
+        Avg HTTP time: 16765 usec (send/recv 791 usec + response wait 15974 usec)
+      Server:
+        Request count: 858
+        Avg request latency: 14370 usec (overhead 273 usec + wait 6467 usec + compute 7630 usec)
+
+    [ 0] SUCCESS
+    Inferences/Second vs. Client Average Batch Latency
+    92 infer/sec       10773 usec
+    191 infer/sec       10471 usec
+    238 infer/sec       16753 usec
+    257 infer/sec       11659 usec
+
+Use the -f flag to generate a file containing CSV output of the
+results.
+
+    $ perf_client -m resnet50_netdef -p3000 -d -l15 -f perf.csv
+
+You can then import the CSV file into a spreadsheet to help visualize
+the latency vs inferences/second tradeoff as well as see some
+components of the latency. Follow these steps:
+
+- Open [this spreadsheet](https://docs.google.com/spreadsheets/d/1Bv7A9faskvHJV1eGGkPxWe1SQGNezWafb62rtwGw9_Q)
+- Make a copy from the File menu "Make a copy..."
+- Open the copy
+- Select the A2 cell
+- From the File menu select "Import..."
+- Select "Upload" and upload the file
+- Select "Replace data at selected cell" and then select the "Import data" button
+
 
 ## C++ API
 

@@ -35,6 +35,7 @@ constexpr char kStatusHTTPHeader[] = "NV-Status";
 constexpr char kInferRESTEndpoint[] = "api/infer";
 constexpr char kStatusRESTEndpoint[] = "api/status";
 constexpr char kProfileRESTEndpoint[] = "api/profile";
+constexpr char kHealthRESTEndpoint[] = "api/health";
 
 constexpr char kTensorFlowGraphDefPlatform[] = "tensorflow_graphdef";
 constexpr char kTensorFlowSavedModelPlatform[] = "tensorflow_savedmodel";

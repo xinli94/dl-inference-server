@@ -45,6 +45,18 @@ const char* ErrorServerId(nic::Error* ctx);
 uint64_t ErrorRequestId(nic::Error* ctx);
 
 //==============================================================================
+// ServerHealthContext
+typedef struct ServerHealthContextCtx ServerHealthContextCtx;
+nic::Error* ServerHealthContextNew(
+  ServerHealthContextCtx** ctx, const char* url, int protocol_int,
+  bool verbose);
+void ServerHealthContextDelete(ServerHealthContextCtx* ctx);
+nic::Error* ServerHealthContextGetReady(
+  ServerHealthContextCtx* ctx, bool* ready);
+nic::Error* ServerHealthContextGetLive(
+  ServerHealthContextCtx* ctx, bool* live);
+
+//==============================================================================
 // ServerStatusContext
 typedef struct ServerStatusContextCtx ServerStatusContextCtx;
 nic::Error* ServerStatusContextNew(

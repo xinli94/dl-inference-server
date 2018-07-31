@@ -79,6 +79,18 @@ _crequest_error_requestid = _crequest.ErrorRequestId
 _crequest_error_requestid.restype = c_int64
 _crequest_error_requestid.argtypes = [c_void_p]
 
+_crequest_health_ctx_new = _crequest.ServerHealthContextNew
+_crequest_health_ctx_new.restype = c_void_p
+_crequest_health_ctx_new.argtypes = [POINTER(c_void_p), _utf8, c_int, c_bool]
+_crequest_health_ctx_del = _crequest.ServerHealthContextDelete
+_crequest_health_ctx_del.argtypes = [c_void_p]
+_crequest_health_ctx_ready = _crequest.ServerHealthContextGetReady
+_crequest_health_ctx_ready.restype = c_void_p
+_crequest_health_ctx_ready.argtypes = [c_void_p, POINTER(c_bool)]
+_crequest_health_ctx_live = _crequest.ServerHealthContextGetLive
+_crequest_health_ctx_live.restype = c_void_p
+_crequest_health_ctx_live.argtypes = [c_void_p, POINTER(c_bool)]
+
 _crequest_status_ctx_new = _crequest.ServerStatusContextNew
 _crequest_status_ctx_new.restype = c_void_p
 _crequest_status_ctx_new.argtypes = [POINTER(c_void_p), _utf8, c_int, _utf8, c_bool]
@@ -220,6 +232,91 @@ class InferenceServerException(Exception):
         0 (zero) if no request is associated.
         """
         return self._request_id
+
+class ServerHealthContext:
+    """
+    Performs a health request to an inference server.
+    """
+
+    def __init__(self, url, protocol, verbose=False):
+        """Initialize the context.
+
+        url - The inference server URL, e.g. localhost:8000.
+
+        protocol - The protocol used to communicate with the server
+        in the form of ProtocolType enumeration.
+
+        verbose - If True generate verbose output.
+        """
+        self._last_request_id = 0
+        self._ctx = c_void_p()
+        _raise_if_error(
+            c_void_p(
+                _crequest_health_ctx_new(
+                    byref(self._ctx), url, int(protocol), verbose)))
+
+    def __del__(self):
+        # when module is unloading may get called after
+        # _crequest_health_ctx_del has been released
+        if _crequest_health_ctx_del is not None:
+            self.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, type, value, traceback):
+        self.close()
+
+    def close(self):
+        """
+        Close the context. Any future calls to is_ready() or
+        is_live() will result in an Error.
+        """
+        _crequest_health_ctx_del(self._ctx)
+        self._ctx = None
+
+    def is_ready(self):
+        """
+        Contact the inference server and get readiness.
+
+        @return bool indicating ready / not-ready.
+
+        Raises InferenceServerException if unable to get readiness.
+        """
+        self._last_request_id = None
+        if self._ctx is None:
+            _raise_error("ServerHealthContext is closed")
+
+        cready = c_bool()
+        self._last_request_id = _raise_if_error(
+            c_void_p(_crequest_health_ctx_ready(self._ctx, byref(cready))))
+        return cready.value
+
+    def is_live(self):
+        """
+        Contact the inference server and get liveness.
+
+        @return bool indicating live / not-live.
+
+        Raises InferenceServerException if unable to get liveness.
+        """
+        self._last_request_id = None
+        if self._ctx is None:
+            _raise_error("ServerHealthContext is closed")
+
+        clive = c_bool()
+        self._last_request_id = _raise_if_error(
+            c_void_p(_crequest_health_ctx_live(self._ctx, byref(clive))))
+        return clive.value
+
+    def get_last_request_id(self):
+        """
+        Get the request ID of the most recent is_ready() or is_live()
+        request, or None if a request has not yet been made or if the
+        last request was not successful.
+        """
+        return self._last_request_id
+
 
 class ServerStatusContext:
     """

@@ -122,6 +122,13 @@ operator<<(std::ostream& out, const Error& err)
 
 //==============================================================================
 
+ServerHealthContext::ServerHealthContext(bool verbose)
+  : verbose_(verbose)
+{
+}
+
+//==============================================================================
+
 ServerStatusContext::ServerStatusContext(bool verbose)
   : verbose_(verbose)
 {
@@ -629,6 +636,57 @@ ResultImpl::SetNextRawResult(
 
 //==============================================================================
 
+InferContext::RequestTimers::RequestTimers()
+{
+  Reset();
+}
+
+Error
+InferContext::RequestTimers::Reset()
+{
+  request_start_.tv_sec = 0;
+  request_end_.tv_sec = 0;
+  send_start_.tv_sec = 0;
+  send_end_.tv_sec = 0;
+  receive_start_.tv_sec = 0;
+  receive_end_.tv_sec = 0;
+  request_start_.tv_nsec = 0;
+  request_end_.tv_nsec = 0;
+  send_start_.tv_nsec = 0;
+  send_end_.tv_nsec = 0;
+  receive_start_.tv_nsec = 0;
+  receive_end_.tv_nsec = 0;
+  return Error::Success;
+}
+
+Error
+InferContext::RequestTimers::Record(Kind kind)
+{
+  switch (kind) {
+    case Kind::REQUEST_START:
+      clock_gettime(CLOCK_MONOTONIC, &request_start_);
+      break;
+    case Kind::REQUEST_END:
+      clock_gettime(CLOCK_MONOTONIC, &request_end_);
+      break;
+    case Kind::SEND_START:
+      clock_gettime(CLOCK_MONOTONIC, &send_start_);
+      break;
+    case Kind::SEND_END:
+      clock_gettime(CLOCK_MONOTONIC, &send_end_);
+      break;
+    case Kind::RECEIVE_START:
+      clock_gettime(CLOCK_MONOTONIC, &receive_start_);
+      break;
+    case Kind::RECEIVE_END:
+      clock_gettime(CLOCK_MONOTONIC, &receive_end_);
+      break;
+  }
+  return Error::Success;
+}
+
+//==============================================================================
+
 InferContext::InferContext(
   const std::string& model_name, int model_version, bool verbose)
   : model_name_(model_name), model_version_(model_version),
@@ -726,6 +784,17 @@ InferContext::SetRunOptions(const InferContext::Options& boptions)
 }
 
 Error
+InferContext::GetStat(Stat* stat)
+{
+  stat->completed_request_count = context_stat_.completed_request_count;
+  stat->cumulative_total_request_time_ns =
+    context_stat_.cumulative_total_request_time_ns;
+  stat->cumulative_send_time_ns = context_stat_.cumulative_send_time_ns;
+  stat->cumulative_receive_time_ns = context_stat_.cumulative_receive_time_ns;
+  return Error::Success;
+}
+
+Error
 InferContext::PreRunProcessing()
 {
   infer_response_buffer_.clear();
@@ -804,6 +873,11 @@ InferContext::GetNextInput(uint8_t* buf, size_t size, size_t* input_bytes)
     }
   }
 
+  // Sent all input bytes
+  if (input_pos_idx_ >= inputs_.size()) {
+    request_timer_.Record(RequestTimers::Kind::SEND_END);
+  }
+
   return Error::Success;
 }
 
@@ -812,6 +886,10 @@ InferContext::SetNextRawResult(
   const uint8_t* buf, size_t size, size_t* result_bytes)
 {
   *result_bytes = 0;
+
+  if (request_timer_.receive_start_.tv_sec == 0) {
+    request_timer_.Record(RequestTimers::Kind::RECEIVE_START);
+  }
 
   while ((size > 0) && (result_pos_idx_ < requested_results_.size())) {
     ResultImpl* io =
@@ -846,6 +924,42 @@ InferContext::SetNextRawResult(
   return Error::Success;
 }
 
+Error InferContext::UpdateStat(const RequestTimers& timer)
+{
+  uint64_t request_start_ns =
+    timer.request_start_.tv_sec * NANOS_PER_SECOND +
+    timer.request_start_.tv_nsec;
+  uint64_t request_end_ns =
+    timer.request_end_.tv_sec * NANOS_PER_SECOND +
+    timer.request_end_.tv_nsec;
+  uint64_t send_start_ns =
+    timer.send_start_.tv_sec * NANOS_PER_SECOND +
+    timer.send_start_.tv_nsec;
+  uint64_t send_end_ns =
+    timer.send_end_.tv_sec * NANOS_PER_SECOND +
+    timer.send_end_.tv_nsec;
+  uint64_t receive_start_ns =
+    timer.receive_start_.tv_sec * NANOS_PER_SECOND +
+    timer.receive_start_.tv_nsec;
+  uint64_t receive_end_ns =
+    timer.receive_end_.tv_sec * NANOS_PER_SECOND +
+    timer.receive_end_.tv_nsec;
+  if ((request_start_ns >= request_end_ns) ||
+        (send_start_ns > send_end_ns) || (receive_start_ns > receive_end_ns)) {
+    return Error(RequestStatusCode::INVALID_ARG, "Timer not set correctly.");
+  }
+
+  uint64_t request_time_ns = request_end_ns - request_start_ns;
+  uint64_t send_time_ns = send_end_ns - send_start_ns;
+  uint64_t receive_time_ns = receive_end_ns - receive_start_ns;
+
+  context_stat_.completed_request_count++;
+  context_stat_.cumulative_total_request_time_ns += request_time_ns;
+  context_stat_.cumulative_send_time_ns += send_time_ns;
+  context_stat_.cumulative_receive_time_ns += receive_time_ns;
+  return Error::Success;
+}
+
 //==============================================================================
 
 ProfileContext::ProfileContext(bool verbose)
@@ -863,6 +977,76 @@ Error
 ProfileContext::StopProfile()
 {
   return SendCommand("stop");
+}
+
+//==============================================================================
+
+Error
+ServerHealthHttpContext::Create(
+  std::unique_ptr<ServerHealthContext>* ctx,
+  const std::string& server_url, bool verbose)
+{
+  ctx->reset(
+    static_cast<ServerHealthContext*>(
+      new ServerHealthHttpContext(server_url, verbose)));
+  return Error::Success;
+}
+
+ServerHealthHttpContext::ServerHealthHttpContext(
+  const std::string& server_url, bool verbose)
+  : ServerHealthContext(verbose), url_(server_url + "/" + kHealthRESTEndpoint)
+{
+}
+
+Error
+ServerHealthHttpContext::GetHealth(const std::string& url, bool* health)
+{
+  if (!curl_global.Status().IsOk()) {
+    return curl_global.Status();
+  }
+
+  CURL* curl = curl_easy_init();
+  if (!curl) {
+    return
+      Error(RequestStatusCode::INTERNAL, "failed to initialize HTTP client");
+  }
+
+  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+  curl_easy_setopt(curl, CURLOPT_USERAGENT, "libcurl-agent/1.0");
+  if (verbose_) {
+    curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+  }
+
+  CURLcode res = curl_easy_perform(curl);
+  if (res != CURLE_OK) {
+    curl_easy_cleanup(curl);
+    return
+      Error(
+        RequestStatusCode::INTERNAL, "HTTP client failed: " +
+        std::string(curl_easy_strerror(res)));
+  }
+
+  // Must use 64-bit integer with curl_easy_getinfo
+  int64_t http_code;
+  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+  curl_easy_cleanup(curl);
+
+  *health = (http_code == 200) ? true : false;
+
+  return Error::Success;
+}
+
+Error
+ServerHealthHttpContext::GetReady(bool* ready)
+{
+  return GetHealth(url_ + "/ready", ready);
+}
+
+Error
+ServerHealthHttpContext::GetLive(bool* live)
+{
+  return GetHealth(url_ + "/live", live);
 }
 
 //==============================================================================
@@ -908,7 +1092,7 @@ ServerStatusHttpContext::GetServerStatus(ServerStatus* server_status)
   server_status->Clear();
   request_status_.Clear();
   response_.clear();
-  
+
   if (!curl_global.Status().IsOk()) {
     return curl_global.Status();
   }
@@ -1010,7 +1194,7 @@ size_t
 ServerStatusHttpContext::ResponseHandler(
   void* contents, size_t size, size_t nmemb, void* userp)
 {
-  ServerStatusHttpContext* ctx = 
+  ServerStatusHttpContext* ctx =
     reinterpret_cast<ServerStatusHttpContext*>(userp);
   uint8_t* buf = reinterpret_cast<uint8_t*>(contents);
   size_t result_bytes = size * nmemb;
@@ -1025,7 +1209,7 @@ InferHttpContext::Create(
   std::unique_ptr<InferContext>* ctx, const std::string& server_url,
   const std::string& model_name, int model_version, bool verbose)
 {
-  InferHttpContext* ctx_ptr = 
+  InferHttpContext* ctx_ptr =
     new InferHttpContext(server_url, model_name, model_version, verbose);
 
   // Get status of the model and create the inputs and outputs.
@@ -1072,7 +1256,7 @@ InferHttpContext::Create(
 InferHttpContext::InferHttpContext(
   const std::string& server_url, const std::string& model_name,
   int model_version, bool verbose)
-  : InferContext(model_name, model_version, verbose)
+  : InferContext(model_name, model_version, verbose), curl_(nullptr)
 {
   // Process url for HTTP request
   // URL doesn't contain the version portion if using the latest version.
@@ -1082,9 +1266,17 @@ InferHttpContext::InferHttpContext(
   }
 }
 
+InferHttpContext::~InferHttpContext()
+{
+  if (curl_ != nullptr) {
+    curl_easy_cleanup(curl_);
+  }
+}
+
 Error
 InferHttpContext::Run(std::vector<std::unique_ptr<Result>>* results)
 {
+  request_timer_.Reset();
   InferResponseHeader infer_response;
 
   PreRunProcessing();
@@ -1093,35 +1285,41 @@ InferHttpContext::Run(std::vector<std::unique_ptr<Result>>* results)
     return curl_global.Status();
   }
 
-  CURL* curl = curl_easy_init();
+  if (curl_ == nullptr) {
+    curl_ = curl_easy_init();
+    std::string full_url = url_ + "?format=binary";
+    curl_easy_setopt(curl_, CURLOPT_URL, full_url.c_str());
+    curl_easy_setopt(curl_, CURLOPT_USERAGENT, "libcurl-agent/1.0");
+    curl_easy_setopt(curl_, CURLOPT_POST, 1L);
+    // Avoid delaying sending on small TCP packets (end of input tensors)
+    // Otherwise, ~40 ms delay happens when reusing the connection.
+    curl_easy_setopt(curl_, CURLOPT_TCP_NODELAY, 1L);
+    if (verbose_) {
+      curl_easy_setopt(curl_, CURLOPT_VERBOSE, 1L);
+    }
+
+    // request data provided by RequestProvider()
+    curl_easy_setopt(curl_, CURLOPT_READFUNCTION, RequestProvider);
+    curl_easy_setopt(curl_, CURLOPT_READDATA, this);
+
+    // response headers handled by ResponseHeaderHandler()
+    curl_easy_setopt(curl_, CURLOPT_HEADERFUNCTION, ResponseHeaderHandler);
+    curl_easy_setopt(curl_, CURLOPT_HEADERDATA, this);
+
+    // response data handled by ResponseHandler()
+    curl_easy_setopt(curl_, CURLOPT_WRITEFUNCTION, ResponseHandler);
+    curl_easy_setopt(curl_, CURLOPT_WRITEDATA, this);
+
+    // set the expected POST size. If you want to POST large amounts of
+    // data, consider CURLOPT_POSTFIELDSIZE_LARGE
+    curl_easy_setopt(curl_, CURLOPT_POSTFIELDSIZE, total_input_byte_size_);
+  }
+  CURL* curl = curl_;
   if (!curl) {
     return
       Error(RequestStatusCode::INTERNAL, "failed to initialize HTTP client");
   }
 
-  std::string full_url = url_ + "?format=binary";
-  curl_easy_setopt(curl, CURLOPT_URL, full_url.c_str());
-  curl_easy_setopt(curl, CURLOPT_USERAGENT, "libcurl-agent/1.0");
-  curl_easy_setopt(curl, CURLOPT_POST, 1L);
-  if (verbose_) {
-    curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
-  }
-
-  // request data provided by RequestProvider()
-  curl_easy_setopt(curl, CURLOPT_READFUNCTION, RequestProvider);
-  curl_easy_setopt(curl, CURLOPT_READDATA, this);
-
-  // response headers handled by ResponseHeaderHandler()
-  curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, ResponseHeaderHandler);
-  curl_easy_setopt(curl, CURLOPT_HEADERDATA, this);
-
-  // response data handled by ResponseHandler()
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, ResponseHandler);
-  curl_easy_setopt(curl, CURLOPT_WRITEDATA, this);
-
-  // set the expected POST size. If you want to POST large amounts of
-  // data, consider CURLOPT_POSTFIELDSIZE_LARGE
-  curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, total_input_byte_size_);
 
   // Headers to specify input and output tensors
   infer_request_str_.clear();
@@ -1134,7 +1332,13 @@ InferHttpContext::Run(std::vector<std::unique_ptr<Result>>* results)
   list = curl_slist_append(list, infer_request_str_.c_str());
   curl_easy_setopt(curl, CURLOPT_HTTPHEADER, list);
 
+  // Take run time
+  request_timer_.Record(RequestTimers::Kind::REQUEST_START);
+  request_timer_.Record(RequestTimers::Kind::SEND_START);
   CURLcode res = curl_easy_perform(curl);
+  request_timer_.Record(RequestTimers::Kind::RECEIVE_END);
+  request_timer_.Record(RequestTimers::Kind::REQUEST_END);
+
   if (res != CURLE_OK) {
     curl_slist_free_all(list);
     curl_easy_cleanup(curl);
@@ -1150,7 +1354,6 @@ InferHttpContext::Run(std::vector<std::unique_ptr<Result>>* results)
   curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
 
   curl_slist_free_all(list);
-  curl_easy_cleanup(curl);
 
   // Should have a request status, if not then create an error status.
   if (request_status_.code() == RequestStatusCode::INVALID) {
@@ -1181,6 +1384,7 @@ InferHttpContext::Run(std::vector<std::unique_ptr<Result>>* results)
   PostRunProcessing(infer_response);
 
   results->swap(requested_results_);
+  UpdateStat(request_timer_);
 
   return Error(request_status_);
 }
@@ -1351,6 +1555,68 @@ ProfileHttpContext::ResponseHeaderHandler(
 //==============================================================================
 
 Error
+ServerHealthGrpcContext::Create(
+  std::unique_ptr<ServerHealthContext>* ctx,
+  const std::string& server_url, bool verbose)
+{
+  ctx->reset(
+    static_cast<ServerHealthContext*>(
+      new ServerHealthGrpcContext(server_url, verbose)));
+  return Error::Success;
+}
+
+ServerHealthGrpcContext::ServerHealthGrpcContext(
+  const std::string& server_url, bool verbose)
+  : ServerHealthContext(verbose),
+    stub_(GRPCService::NewStub(GetChannel(server_url)))
+{
+}
+
+Error
+ServerHealthGrpcContext::GetHealth(const std::string& mode, bool* health)
+{
+  Error err;
+
+  HealthRequest request;
+  HealthResponse response;
+  grpc::ClientContext context;
+
+  request.set_mode(mode);
+  grpc::Status grpc_status = stub_->Health(&context, request, &response);
+  if (grpc_status.ok()) {
+    *health = response.health();
+    err = Error(response.request_status());
+  } else {
+    // Something wrong with the gRPC conncection
+    err =
+      Error(
+        RequestStatusCode::INTERNAL, "gRPC client failed: " +
+        std::to_string(grpc_status.error_code()) + ": " +
+        grpc_status.error_message());
+  }
+
+  if (verbose_ && err.IsOk()) {
+    std::cout << mode << ": " << *health << std::endl;
+  }
+
+  return err;
+}
+
+Error
+ServerHealthGrpcContext::GetReady(bool* ready)
+{
+  return GetHealth("ready", ready);
+}
+
+Error
+ServerHealthGrpcContext::GetLive(bool* live)
+{
+  return GetHealth("live", live);
+}
+
+//==============================================================================
+
+Error
 ServerStatusGrpcContext::Create(
   std::unique_ptr<ServerStatusContext>* ctx,
   const std::string& server_url, bool verbose)
@@ -1477,6 +1743,7 @@ InferGrpcContext::InferGrpcContext(
 Error
 InferGrpcContext::Run(std::vector<std::unique_ptr<Result>>* results)
 {
+  request_timer_.Reset();
   results->clear();
 
   Error grpc_status;
@@ -1487,6 +1754,9 @@ InferGrpcContext::Run(std::vector<std::unique_ptr<Result>>* results)
   InferRequest request;
   InferResponse response;
   grpc::ClientContext context;
+
+  // Use send timer to measure time for marshalling infer request
+  request_timer_.Record(RequestTimers::Kind::SEND_START);
 
   request.set_model_name(model_name_);
   request.set_version(std::to_string(model_version_));
@@ -1506,8 +1776,18 @@ InferGrpcContext::Run(std::vector<std::unique_ptr<Result>>* results)
     input_pos_idx_++;
   }
 
+  request_timer_.Record(RequestTimers::Kind::SEND_END);
+
+  // Take run time
+  // (we can only take run time for gRPC because when bytes get sent/received
+  //  is encapsulated.)
+  request_timer_.Record(RequestTimers::Kind::REQUEST_START);
   grpc::Status status = stub_->Infer(&context, request, &response);
+  request_timer_.Record(RequestTimers::Kind::REQUEST_END);
+
   if (status.ok()) {
+    // Use send timer to measure time for unmarshalling infer response
+    request_timer_.Record(RequestTimers::Kind::RECEIVE_START);
     infer_response.Swap(response.mutable_meta_data());
     request_status_.Swap(response.mutable_request_status());
     // Reset position index for sanity check, this will be used
@@ -1524,6 +1804,7 @@ InferGrpcContext::Run(std::vector<std::unique_ptr<Result>>* results)
       }
     }
     grpc_status = Error(request_status_);
+    request_timer_.Record(RequestTimers::Kind::RECEIVE_END);
   } else {
     // Something wrong with the gRPC conncection
     grpc_status = Error(RequestStatusCode::INTERNAL, "gRPC client failed: " +
@@ -1538,6 +1819,7 @@ InferGrpcContext::Run(std::vector<std::unique_ptr<Result>>* results)
   PostRunProcessing(infer_response);
 
   results->swap(requested_results_);
+  UpdateStat(request_timer_);
 
   return Error(request_status_);
 }
