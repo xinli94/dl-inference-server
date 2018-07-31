@@ -39,9 +39,9 @@ is also available for inference server issues and questions.
 
 ## Branches
 
-**master**: Active development branch. Typically will be compatible
- with the currently released Inference Server container, but not
- guaranteed.
+**master**: Active development branch. Typically will contain
+ development corresponding to the next upcoming Inference Server
+ container release.
 
 **yy.mm**: Branch compatible with Inference Server yy.mm, for
   example *18.07*.
@@ -57,8 +57,8 @@ package is required by the Python image\_client example.
     sudo apt-get update
     sudo apt-get install build-essential libcurl3-dev libopencv-dev libopencv-core-dev python-pil \
                          software-properties-common autoconf automake libtool pkg-config
-    
-Creating the whl file for the Python client library requires setuptools. 
+
+Creating the whl file for the Python client library requires setuptools.
 And grpcio-tools is required for gRPC support in Python client library.
 
     pip install --no-cache-dir --upgrade setuptools grpcio-tools
@@ -71,12 +71,12 @@ and example image\_client and perf\_client applications can be built:
 Build artifacts are in build/.  The Python whl file is generated in
 build/dist/dist/ and can be installed with a command like the following:
 
-    pip install --no-cache-dir --upgrade build/dist/dist/inference_server-1.0.0-cp27-cp27mu-linux_x86_64.whl
+    pip install --no-cache-dir --upgrade build/dist/dist/inference_server-0.4.0-cp27-cp27mu-linux_x86_64.whl
 
 ## Building the Clients with Docker
 
-A Dockerfile is provided for building the client libraries and examples 
-inside a container. 
+A Dockerfile is provided for building the client libraries and examples
+inside a container.
 
 Before building, edit the Dockerfile to set PYVER to either 2.7 or 3.5
 to select the version of Python that you will be using. The following
@@ -96,7 +96,7 @@ copy the images.
 
 You can now access image\_client and perf\_client from /tmp on the
 host system. Before running the C++ or Python examples on the host the
-appropriate dependencies must be installed. 
+appropriate dependencies must be installed.
 
 OpenCV is used by the C++ image\_client example to preprocess images
 before sending them to the inference server for inferencing.
@@ -116,9 +116,8 @@ so install that package before running.
 
 The image classification example that uses the C++ client API is
 available at src/clients/c++/image\_client.cc. After building as
-described above and copying to the host system, the executable is
-available at /tmp/image\_client. The python version of the image
-classification client is available at
+described above the executable is available at build/image\_client.
+The python version of the image classification client is available at
 src/clients/python/image\_client.py.
 
 To use image\_client (or image\_client.py) you must first have an
@@ -148,24 +147,23 @@ HTTP endpoint and port 8001 exposes the gRPC endpoint. Replace
 /path/to/dl-inference-server/examples/models with the corresponding
 path in your local clone of this repo. Once the server is running you
 can use image\_client application to send inference requests to the
-server. Note that the LD\_LIBRARY\_PATH is needed for the gRPC
-libraries you copied from the container.
+server.
 
-    $ LD_LIBRARY_PATH=/tmp /tmp/image_client -m resnet50_netdef -s INCEPTION examples/data/mug.jpg
+    $ image_client -m resnet50_netdef -s INCEPTION examples/data/mug.jpg
 
 The Python version of the application accepts the same command-line
 arguments.
 
-    $ LD_LIBRARY_PATH=/tmp src/clients/python/image_client.py -m resnet50_netdef -s INCEPTION examples/data/mug.jpg
+    $ src/clients/python/image_client.py -m resnet50_netdef -s INCEPTION examples/data/mug.jpg
 
 The image\_client and image\_client.py examples use the inference
-server client library to talk to the inference server. By default they
-instruct the client library to use HTTP protocol to talk to the
-inference server, but you can use gRPC protocol by providing the -i
-flag. You must also use the -u flag to point at the gRPC endpoint on
-the inference server.
+server client library to talk to the inference server. By default the
+examples instruct the client library to use HTTP protocol to talk to
+the inference server, but you can use gRPC protocol by providing the
+-i flag. You must also use the -u flag to point at the gRPC endpoint
+on the inference server.
 
-    $ LD_LIBRARY_PATH=/tmp /tmp/image_client -i grpc -u localhost:8001 -m resnet50_netdef -s INCEPTION examples/data/mug.jpg
+    $ image_client -i grpc -u localhost:8001 -m resnet50_netdef -s INCEPTION examples/data/mug.jpg
 
 By default the client prints the most probable classification for the image.
 
@@ -174,7 +172,7 @@ By default the client prints the most probable classification for the image.
 
 Use the -c flag to see more classifications.
 
-    $ LD_LIBRARY_PATH=/tmp /tmp/image_client -m resnet50_netdef -s INCEPTION -c 3 examples/data/mug.jpg
+    $ image_client -m resnet50_netdef -s INCEPTION -c 3 examples/data/mug.jpg
     Output probabilities:
     batch 0: 504 (COFFEE MUG) = 0.777365267277
     batch 0: 968 (CUP) = 0.213909029961
@@ -187,7 +185,7 @@ Currently, the image\_client examples just send the same image
 multiple times, so you will just see the same classification results
 repeated (as indicated by the 'cnt' value).
 
-    $ LD_LIBRARY_PATH=/tmp /tmp/image_client -m resnet50_netdef -s INCEPTION -b 2 examples/data/mug.jpg
+    $ image_client -m resnet50_netdef -s INCEPTION -b 2 examples/data/mug.jpg
     Prediction totals:
             cnt=2	(504) COFFEE MUG
 
@@ -196,7 +194,7 @@ examples except that instead of using the inference server client
 library it uses the gRPC generated client library to communicate with
 the inference server.
 
-    $ LD_LIBRARY_PATH=/tmp src/clients/python/grpc_image_client.py -m resnet50_netdef -s INCEPTION examples/data/mug.jpg -u localhost:8001
+    $ src/clients/python/grpc_image_client.py -m resnet50_netdef -s INCEPTION examples/data/mug.jpg -u localhost:8001
 
 
 ## Perf Example
@@ -232,7 +230,7 @@ options. You vary thread count (-t) to control concurrency. Use
 warmup-passes (-w) to avoid start-up overhead and measurement-passes
 (-p) to control the length of the run. For example,
 
-    $ LD_LIBRARY_PATH=/tmp /tmp/perf_client -m resnet50_netdef -t4 -w5 -p100
+    $ perf_client -m resnet50_netdef -t4 -w5 -p100
     *** Warming up ***
     *** Begin ***
     *** End ***
