@@ -218,8 +218,10 @@ public:
   Error SetRaw(const uint8_t* input, size_t input_byte_size) override;
 
   // Copy into 'buf' up to 'size' bytes of this input's data. Return
-  // the actual amount copied in 'input_bytes'.
-  Error GetNext(uint8_t* buf, size_t size, size_t* input_bytes);
+  // the actual amount copied in 'input_bytes' and if the end of input
+  // is reached in 'end_of_input'
+  Error GetNext(
+    uint8_t* buf, size_t size, size_t* input_bytes, bool* end_of_input);
 
   // Copy the pointer of the raw buffer at 'batch_idx' into 'buf'
   Error GetRaw(size_t batch_idx, const uint8_t** buf) const;
@@ -275,7 +277,8 @@ InputImpl::SetRaw(const std::vector<uint8_t>& input)
 }
 
 Error
-InputImpl::GetNext(uint8_t* buf, size_t size, size_t* input_bytes)
+InputImpl::GetNext(
+  uint8_t* buf, size_t size, size_t* input_bytes, bool* end_of_input)
 {
   size_t total_size = 0;
 
@@ -297,6 +300,7 @@ InputImpl::GetNext(uint8_t* buf, size_t size, size_t* input_bytes)
   }
 
   *input_bytes = total_size;
+  *end_of_input = (bufs_idx_ >= bufs_.size());
   return Error::Success;
 }
 
@@ -858,21 +862,21 @@ InferContext::GetNextInput(uint8_t* buf, size_t size, size_t* input_bytes)
     InputImpl* io =
       reinterpret_cast<InputImpl*>(inputs_[input_pos_idx_].get());
     size_t ib = 0;
-    Error err = io->GetNext(buf, size, &ib);
+    bool eoi = false;
+    Error err = io->GetNext(buf, size, &ib, &eoi);
     if (!err.IsOk()) {
       return err;
     }
-
-    // If input didn't have any more bytes then move to the next.
-    if (ib == 0) {
+    // If input was completely read then move to the next.
+    if (eoi) {
       input_pos_idx_++;
-    } else {
+    }
+    if (ib != 0) {
       *input_bytes += ib;
       size -= ib;
       buf += ib;
     }
   }
-
   // Sent all input bytes
   if (input_pos_idx_ >= inputs_.size()) {
     request_timer_.Record(RequestTimers::Kind::SEND_END);
@@ -1384,7 +1388,10 @@ InferHttpContext::Run(std::vector<std::unique_ptr<Result>>* results)
   PostRunProcessing(infer_response);
 
   results->swap(requested_results_);
-  UpdateStat(request_timer_);
+  Error err = UpdateStat(request_timer_);
+  if (!err.IsOk()) {
+    std::cerr << "Failed to update context stat: " << err << std::endl;
+  }
 
   return Error(request_status_);
 }
@@ -1819,7 +1826,10 @@ InferGrpcContext::Run(std::vector<std::unique_ptr<Result>>* results)
   PostRunProcessing(infer_response);
 
   results->swap(requested_results_);
-  UpdateStat(request_timer_);
+  Error err = UpdateStat(request_timer_);
+  if (!err.IsOk()) {
+    std::cerr << "Failed to update context stat: " << err << std::endl;
+  }
 
   return Error(request_status_);
 }
