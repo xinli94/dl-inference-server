@@ -211,8 +211,10 @@ public:
   Error SetRaw(const uint8_t* input, size_t input_byte_size) override;
 
   // Copy into 'buf' up to 'size' bytes of this input's data. Return
-  // the actual amount copied in 'input_bytes'.
-  Error GetNext(uint8_t* buf, size_t size, size_t* input_bytes);
+  // the actual amount copied in 'input_bytes' and if the end of input
+  // is reached in 'end_of_input'
+  Error GetNext(
+    uint8_t* buf, size_t size, size_t* input_bytes, bool* end_of_input);
 
   // Copy the pointer of the raw buffer at 'batch_idx' into 'buf'
   Error GetRaw(size_t batch_idx, const uint8_t** buf) const;
@@ -268,7 +270,8 @@ InputImpl::SetRaw(const std::vector<uint8_t>& input)
 }
 
 Error
-InputImpl::GetNext(uint8_t* buf, size_t size, size_t* input_bytes)
+InputImpl::GetNext(
+  uint8_t* buf, size_t size, size_t* input_bytes, bool* end_of_input)
 {
   size_t total_size = 0;
 
@@ -290,6 +293,7 @@ InputImpl::GetNext(uint8_t* buf, size_t size, size_t* input_bytes)
   }
 
   *input_bytes = total_size;
+  *end_of_input = (bufs_idx_ >= bufs_.size());
   return Error::Success;
 }
 
@@ -789,15 +793,16 @@ InferContext::GetNextInput(uint8_t* buf, size_t size, size_t* input_bytes)
     InputImpl* io =
       reinterpret_cast<InputImpl*>(inputs_[input_pos_idx_].get());
     size_t ib = 0;
-    Error err = io->GetNext(buf, size, &ib);
+    bool eoi = false;
+    Error err = io->GetNext(buf, size, &ib, &eoi);
     if (!err.IsOk()) {
       return err;
     }
-
-    // If input didn't have any more bytes then move to the next.
-    if (ib == 0) {
+    // If input was completely read then move to the next.
+    if (eoi) {
       input_pos_idx_++;
-    } else {
+    }
+    if (ib != 0) {
       *input_bytes += ib;
       size -= ib;
       buf += ib;
@@ -908,7 +913,7 @@ ServerStatusHttpContext::GetServerStatus(ServerStatus* server_status)
   server_status->Clear();
   request_status_.Clear();
   response_.clear();
-  
+
   if (!curl_global.Status().IsOk()) {
     return curl_global.Status();
   }
@@ -1010,7 +1015,7 @@ size_t
 ServerStatusHttpContext::ResponseHandler(
   void* contents, size_t size, size_t nmemb, void* userp)
 {
-  ServerStatusHttpContext* ctx = 
+  ServerStatusHttpContext* ctx =
     reinterpret_cast<ServerStatusHttpContext*>(userp);
   uint8_t* buf = reinterpret_cast<uint8_t*>(contents);
   size_t result_bytes = size * nmemb;
@@ -1025,7 +1030,7 @@ InferHttpContext::Create(
   std::unique_ptr<InferContext>* ctx, const std::string& server_url,
   const std::string& model_name, int model_version, bool verbose)
 {
-  InferHttpContext* ctx_ptr = 
+  InferHttpContext* ctx_ptr =
     new InferHttpContext(server_url, model_name, model_version, verbose);
 
   // Get status of the model and create the inputs and outputs.
