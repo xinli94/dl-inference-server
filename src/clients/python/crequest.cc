@@ -50,6 +50,12 @@ ErrorIsOk(nic::Error* ctx)
   return ctx->IsOk();
 }
 
+bool
+ErrorIsUnavailable(nic::Error* ctx)
+{
+  return (ctx->Code() == ni::RequestStatusCode::UNAVAILABLE);
+}
+
 const char*
 ErrorMessage(nic::Error* ctx)
 {
@@ -234,6 +240,7 @@ ServerStatusContextGetServerStatus(
 struct InferContextCtx {
   std::unique_ptr<nic::InferContext> ctx;
   std::vector<std::unique_ptr<nic::InferContext::Result>> results;
+  std::vector<std::shared_ptr<nic::InferContext::Request>> requests;
 };
 
 nic::Error*
@@ -286,6 +293,47 @@ InferContextRun(InferContextCtx* ctx)
 {
   ctx->results.clear();
   nic::Error err = ctx->ctx->Run(&ctx->results);
+  return new nic::Error(err);
+}
+
+nic::Error*
+InferContextAsyncRun(InferContextCtx* ctx, size_t* request_id)
+{
+  std::shared_ptr<nic::InferContext::Request> request;
+  nic::Error err = ctx->ctx->AsyncRun(&request);
+  ctx->requests.push_back(request);
+  *request_id = request->Id();
+  return new nic::Error(err);
+}
+
+nic::Error*
+InferContextGetAsyncRunResults(
+  InferContextCtx* ctx, size_t request_id, bool wait)
+{
+  for (auto itr = ctx->requests.begin(); itr != ctx->requests.end(); itr++) {
+    if ((*itr)->Id() == request_id) {
+      ctx->results.clear();
+      nic::Error err =
+        ctx->ctx->GetAsyncRunResults(&ctx->results, *itr, wait);
+      if (err.IsOk()) {
+        ctx->requests.erase(itr);
+      }
+      return new nic::Error(err);
+    }
+  }
+  return new nic::Error(ni::RequestStatusCode::INVALID_ARG,
+    "The request ID doesn't match any existing asynchrnous requests");
+}
+
+nic::Error*
+InferContextGetReadyAsyncRequest(
+  InferContextCtx* ctx, size_t* request_id, bool wait)
+{
+  // Here we assume that all asynchronous request is created by calling
+  // InferContextAsyncRun(). Thus we don't need to check ctx->requests.
+  std::shared_ptr<nic::InferContext::Request> request;
+  nic::Error err = ctx->ctx->GetReadyAsyncRequest(&request, wait);
+  *request_id = request->Id();
   return new nic::Error(err);
 }
 
@@ -353,7 +401,7 @@ InferContextInputNew(
   InferContextInputCtx* lctx = new InferContextInputCtx;
   nic::Error err =
     infer_ctx->ctx->GetInput(std::string(input_name), &lctx->input);
-
+  lctx->input->Reset();
   *ctx = lctx;
   return new nic::Error(err);
 }

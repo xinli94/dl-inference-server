@@ -40,6 +40,7 @@ extern "C" {
 nic::Error* ErrorNew(const char* msg);
 void ErrorDelete(nic::Error* ctx);
 bool ErrorIsOk(nic::Error* ctx);
+bool ErrorIsUnavailable(nic::Error* ctx);
 const char* ErrorMessage(nic::Error* ctx);
 const char* ErrorServerId(nic::Error* ctx);
 uint64_t ErrorRequestId(nic::Error* ctx);
@@ -76,6 +77,11 @@ void InferContextDelete(InferContextCtx* ctx);
 nic::Error* InferContextSetOptions(
   InferContextCtx* ctx, nic::InferContext::Options* options);
 nic::Error* InferContextRun(InferContextCtx* ctx);
+nic::Error* InferContextAsyncRun(InferContextCtx* ctx, size_t* request_id);
+nic::Error* InferContextGetAsyncRunResults(
+  InferContextCtx* ctx, size_t request_id, bool wait);
+nic::Error* InferContextGetReadyAsyncRequest(
+  InferContextCtx* ctx, size_t* request_id, bool wait);
 
 //==============================================================================
 // InferContext::Options

@@ -44,7 +44,7 @@ is also available for inference server issues and questions.
  container release.
 
 **yy.mm**: Branch compatible with Inference Server yy.mm, for
-  example *18.08*.
+  example *18.09*.
 
 ## Building the Clients
 
@@ -124,7 +124,7 @@ Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html)
 launch the inference server container pointing to that model
 store. For example:
 
-    $ nvidia-docker run --rm -p8000:8000 -p8001:8001 -v/path/to/dl-inference-server/examples/models:/models nvcr.io/nvidia/inferenceserver:18.08-py2 inference_server --model-store=/models
+    $ nvidia-docker run --rm -p8000:8000 -p8001:8001 -v/path/to/dl-inference-server/examples/models:/models nvcr.io/nvidia/inferenceserver:18.09-py3 inference_server --model-store=/models
 
 Make sure you choose the most recent version of
 nvcr.io/nvidia/inferenceserver. Port 8000 exposes the inference server
@@ -132,7 +132,7 @@ HTTP endpoint and port 8001 exposes the gRPC endpoint. Replace
 /path/to/dl-inference-server/examples/models with the corresponding
 path in your local clone of this repo. Once the server is running you
 can use image\_client application to send inference requests to the
-server.
+server. You can specify a single image or a directory holding images.
 
     $ image_client -m resnet50_netdef -s INCEPTION examples/data/mug.jpg
 
@@ -165,10 +165,12 @@ Use the -c flag to see more classifications.
     Prediction totals:
             cnt=1	(504) COFFEE MUG
 
-The -b flag allows you to send a batch of images for inferencing.
-Currently, the image\_client examples just send the same image
-multiple times, so you will just see the same classification results
-repeated (as indicated by the 'cnt' value).
+The -b flag allows you to send a batch of images for inferencing.  The
+image\_client will form the batch from the image or images that you
+specified. If the batch is bigger than the number of images then
+image\_client will just repeat an image to fill the batch. This
+example specifies a single image so you will see the same
+classification results repeated (as indicated by the 'cnt' value).
 
     $ image_client -m resnet50_netdef -s INCEPTION -b 2 examples/data/mug.jpg
     Prediction totals:
@@ -179,7 +181,7 @@ examples except that instead of using the inference server client
 library it uses the gRPC generated client library to communicate with
 the inference server.
 
-    $ src/clients/python/grpc_image_client.py -m resnet50_netdef -s INCEPTION examples/data/mug.jpg -u localhost:8001
+    $ src/clients/python/grpc_image_client.py -m resnet50_netdef -s INCEPTION -u localhost:8001 examples/data/mug.jpg
 
 
 ## Perf Example
@@ -203,7 +205,7 @@ Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html)
 launch the inference server container pointing to that model
 store. For example:
 
-    $ nvidia-docker run --rm -p8000:8000 -p8001:8001 -v/path/to/dl-inference-server/examples/models:/models nvcr.io/nvidia/inferenceserver:18.08-py2 inference_server --model-store=/models
+    $ nvidia-docker run --rm -p8000:8000 -p8001:8001 -v/path/to/dl-inference-server/examples/models:/models nvcr.io/nvidia/inferenceserver:18.09-py3 inference_server --model-store=/models
 
 Make sure you choose the most recent version of
 nvcr.io/nvidia/inferenceserver. Port 8000 exposes the inference server
@@ -240,7 +242,8 @@ command-line.
 In the second mode perf\_client will generate a inferences/second
 vs. latency curve by increasing concurrency until a specificy latency
 limit is reached. This mode is enabled by using the -d option and -l
-to specify the latency limit.
+to specify the latency limit (you can also use -c to specify a maximum
+concurrency limit).
 
     $ perf_client -m resnet50_netdef -p3000 -d -l15
     *** Measurement Settings ***
@@ -290,10 +293,10 @@ to specify the latency limit.
 
     [ 0] SUCCESS
     Inferences/Second vs. Client Average Batch Latency
-    92 infer/sec       10773 usec
-    191 infer/sec       10471 usec
-    238 infer/sec       16753 usec
-    257 infer/sec       11659 usec
+    Concurrency: 1, 92 infer/sec, latency 10773 usec
+    Concurrency: 2, 191 infer/sec, latency 10471 usec
+    Concurrency: 3, 257 infer/sec, latency 11659 usec
+    Concurrency: 4, 238 infer/sec, latency 16753 usec
 
 Use the -f flag to generate a file containing CSV output of the
 results.
@@ -304,7 +307,7 @@ You can then import the CSV file into a spreadsheet to help visualize
 the latency vs inferences/second tradeoff as well as see some
 components of the latency. Follow these steps:
 
-- Open [this spreadsheet](https://docs.google.com/spreadsheets/d/1Bv7A9faskvHJV1eGGkPxWe1SQGNezWafb62rtwGw9_Q)
+- Open [this spreadsheet](https://docs.google.com/spreadsheets/d/1zszgmbSNHHXy0DVEU_4lrL4Md-6dUKwy_mLVmcseUrE)
 - Make a copy from the File menu "Make a copy..."
 - Open the copy
 - Select the A2 cell

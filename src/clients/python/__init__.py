@@ -69,6 +69,9 @@ _crequest_error_del.argtypes = [c_void_p]
 _crequest_error_isok = _crequest.ErrorIsOk
 _crequest_error_isok.restype = c_bool
 _crequest_error_isok.argtypes = [c_void_p]
+_crequest_error_isunavailable = _crequest.ErrorIsUnavailable
+_crequest_error_isunavailable.restype = c_bool
+_crequest_error_isunavailable.argtypes = [c_void_p]
 _crequest_error_msg = _crequest.ErrorMessage
 _crequest_error_msg.restype = c_char_p
 _crequest_error_msg.argtypes = [c_void_p]
@@ -111,6 +114,15 @@ _crequest_infer_ctx_set_options.argtypes = [c_void_p, c_void_p]
 _crequest_infer_ctx_run = _crequest.InferContextRun
 _crequest_infer_ctx_run.restype = c_void_p
 _crequest_infer_ctx_run.argtypes = [c_void_p]
+_crequest_infer_ctx_async_run = _crequest.InferContextAsyncRun
+_crequest_infer_ctx_async_run.restype = c_void_p
+_crequest_infer_ctx_async_run.argtypes = [c_void_p, POINTER(c_uint64)]
+_crequest_infer_ctx_get_async_run_results = _crequest.InferContextGetAsyncRunResults
+_crequest_infer_ctx_get_async_run_results.restype = c_void_p
+_crequest_infer_ctx_get_async_run_results.argtypes = [c_void_p, c_uint64, c_bool]
+_crequest_infer_ctx_get_ready_async_request = _crequest.InferContextGetReadyAsyncRequest
+_crequest_infer_ctx_get_ready_async_request.restype = c_void_p
+_crequest_infer_ctx_get_ready_async_request.argtypes = [c_void_p, POINTER(c_uint64), c_bool]
 
 _crequest_infer_ctx_options_new = _crequest.InferContextOptionsNew
 _crequest_infer_ctx_options_new.restype = c_void_p
@@ -430,6 +442,7 @@ class InferContext:
         self._last_request_id = None
         self._last_request_model_name = None
         self._last_request_model_version = None
+        self._requested_outputs_dict = dict()
         self._ctx = c_void_p()
 
         imodel_version = -1 if model_version is None else model_version
@@ -480,48 +493,7 @@ class InferContext:
             return np.float64
         _raise_error("unknown result datatype " + ctype.value)
 
-    def close(self):
-        """
-        Close the context. Any future calls to object will result in an
-        Error.
-        """
-        _crequest_infer_ctx_del(self._ctx)
-        self._ctx = None
-
-    def run(self, inputs, outputs, batch_size=1):
-        """
-        Run inference using the supplied 'inputs' to calculate the outputs
-        specified by 'outputs'.
-
-        inputs - Dictionary from input name to the value(s) for that
-        input. An input value is specified as a numpy array. Each
-        input in the dictionary maps to a list of values (i.e. a list
-        of numpy array objects), where the length of the list must
-        equal the 'batch_size'.
-
-        outputs - Dictionary from output name to an output format. The
-        inference server will use the input values to calculate the value for
-        the requested outputs. See return value discussion for how output
-        format is used.
-
-        batch_size - The number of batches specified by the inputs.
-
-        Returns a dictionary from output name to the list of values for that
-        output (one list element for each batch). The format of a value
-        returned for an output depends on the output format specified in
-        'outputs'. Supported output formats are:
-          RAW   - numpy array of the appropriate type.
-          CLASS - Specified as tuple (CLASS, k). Top 'k' output values are
-                  returned as an array of (index, value, label) tuples.
-
-        Raises InferenceServerException if all inputs are not specified, if
-        the size of input data does not match expectations, if unknown output
-        names are specified or if server fails to perform inference.
-        """
-        self._last_request_id = None
-        self._last_request_model_name = None
-        self._last_request_model_version = None
-
+    def _prepare_request(self, inputs, outputs, batch_size, contiguous_input_values):
         # Set run options using formats specified in 'outputs'
         options = c_void_p()
         try:
@@ -545,11 +517,7 @@ class InferContext:
         finally:
             _crequest_infer_ctx_options_del(options)
 
-        # Set the input values. The input values must be contiguous
-        # and the lifetime of those contiguous copies must span until
-        # the inference completes so grab a reference to them at this
-        # scope.
-        contiguous_input_values = list()
+        # Set the input values in the provided 'contiguous_input_values'
         for (input_name, input_values) in iteritems(inputs):
             input = c_void_p()
             try:
@@ -568,9 +536,7 @@ class InferContext:
             finally:
                 _crequest_infer_ctx_input_del(input)
 
-        # Run inference...
-        self._last_request_id = _raise_if_error(c_void_p(_crequest_infer_ctx_run(self._ctx)))
-
+    def _get_results(self, outputs, batch_size):
         # Create the result map.
         results = dict()
         for (output_name, output_format) in iteritems(outputs):
@@ -644,6 +610,153 @@ class InferContext:
                 _crequest_infer_ctx_result_del(result)
 
         return results
+
+    def close(self):
+        """
+        Close the context. Any future calls to object will result in an
+        Error.
+        """
+        _crequest_infer_ctx_del(self._ctx)
+        self._ctx = None
+
+    def run(self, inputs, outputs, batch_size=1):
+        """
+        Run inference using the supplied 'inputs' to calculate the outputs
+        specified by 'outputs'.
+
+        inputs - Dictionary from input name to the value(s) for that
+        input. An input value is specified as a numpy array. Each
+        input in the dictionary maps to a list of values (i.e. a list
+        of numpy array objects), where the length of the list must
+        equal the 'batch_size'.
+
+        outputs - Dictionary from output name to an output format. The
+        inference server will use the input values to calculate the value for
+        the requested outputs. See return value discussion for how output
+        format is used.
+
+        batch_size - The number of batches specified by the inputs.
+
+        Returns a dictionary from output name to the list of values for that
+        output (one list element for each batch). The format of a value
+        returned for an output depends on the output format specified in
+        'outputs'. Supported output formats are:
+          RAW   - numpy array of the appropriate type.
+          CLASS - Specified as tuple (CLASS, k). Top 'k' output values are
+                  returned as an array of (index, value, label) tuples.
+
+        Raises InferenceServerException if all inputs are not specified, if
+        the size of input data does not match expectations, if unknown output
+        names are specified or if server fails to perform inference.
+        """
+        self._last_request_id = None
+        self._last_request_model_name = None
+        self._last_request_model_version = None
+
+        # The input values must be contiguous and the lifetime of those
+        # contiguous copies must span until the inference completes
+        # so grab a reference to them at this scope.
+        contiguous_input = list()
+
+        # Set run option and input values
+        self._prepare_request(inputs, outputs, batch_size, contiguous_input)
+
+        # Run inference...
+        self._last_request_id = _raise_if_error(c_void_p(_crequest_infer_ctx_run(self._ctx)))
+
+        return self._get_results(outputs, batch_size)
+
+    def async_run(self, inputs, outputs, batch_size=1):
+        """
+        Run inference asynchronously using the supplied 'inputs'
+        to calculate the outputs specified by 'outputs'.
+
+        See run() for detail of parameters
+
+        Returns a integer as the identifier of the asynchronous request,
+        which can be passed to get_async_run_results() to retrieve its results
+        if the request is completed
+
+        Raises InferenceServerException if all inputs are not specified, if
+        the size of input data does not match expectations, if unknown output
+        names are specified or if server fails to perform inference.
+        """
+        # Same situation as in run(), but the list will be kept inside
+        # the object given that the request is asynchronous
+        contiguous_input = list()
+
+        # Set run option and input values
+        self._prepare_request(inputs, outputs, batch_size, contiguous_input)
+
+        # Run asynchronous inference...
+        c_request_id = c_uint64()
+        _raise_if_error(
+            c_void_p(
+                _crequest_infer_ctx_async_run(self._ctx, byref(c_request_id))))
+
+        self._requested_outputs_dict[c_request_id.value] = (outputs, batch_size, contiguous_input)
+
+        return c_request_id.value
+
+    def get_async_run_results(self, request_id, wait):
+        """
+        Retrieve the results of an asynchronous run using
+        the supplied 'request_id'
+
+        request_id - The integer ID of the asynchronous request.
+
+        wait - If True wait until the request results are ready.
+
+        Return None if the results is not ready and 'wait' is False.
+        Otherwise, see run() for detail of return
+
+        Raises InferenceServerException if the request ID supplied is not valid,
+        or if server fails to perform inference.
+        """
+        # Get async run results
+        err = c_void_p(_crequest_infer_ctx_get_async_run_results(
+            self._ctx, request_id, wait))
+
+        if not wait:
+            isunavailable = _crequest_error_isunavailable(err)
+            if isunavailable:
+                _crequest_error_del(err)
+                return None
+        
+        self._last_request_id = _raise_if_error(err)
+
+        requested_outputs = self._requested_outputs_dict[request_id]
+        del self._requested_outputs_dict[request_id]
+
+        return self._get_results(requested_outputs[0], requested_outputs[1])
+
+    def get_ready_async_request(self, wait):
+        """
+        Retrieve the ID of an asynchronous request that has results ready
+
+        wait - If True wait until one request is ready.
+
+        Returns None if the results is not ready and 'wait' is False.
+        Otherwise, return a integer as the identifier of the asynchronous
+        request, which can be passed to get_async_run_results() to retrieve
+        its results.
+
+        Raises InferenceServerException if no asynchronous request is created
+        """
+        # Get async run results
+        c_request_id = c_uint64()
+        err = c_void_p(_crequest_infer_ctx_get_ready_async_request(
+            self._ctx, byref(c_request_id), wait))
+
+        if not wait:
+            isunavailable = _crequest_error_isunavailable(err)
+            if isunavailable:
+                _crequest_error_del(err)
+                return None
+
+        _raise_if_error(err)
+
+        return c_request_id.value
 
     def get_last_request_id(self):
         """

@@ -27,10 +27,13 @@
 #include "src/clients/c++/request.h"
 
 #include <algorithm>
+#include <dirent.h>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <string>
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
@@ -160,8 +163,8 @@ Preprocess(
 void
 Infer(
   std::unique_ptr<nic::InferContext>& ctx, const size_t batch_size,
-  const size_t topk, const std::vector<uint8_t>& input_data,
-  std::vector<std::unique_ptr<nic::InferContext::Result>>* results,
+  const size_t topk, const std::vector<std::vector<uint8_t>>& inputs_data,
+  std::vector<std::vector<std::unique_ptr<nic::InferContext::Result>>>* results,
   const bool verbose = false)
 {
   nic::Error err(ni::RequestStatusCode::SUCCESS);
@@ -185,38 +188,109 @@ Infer(
     exit(1);
   }
 
-  // Forget any previous inputs and set input (i.e. the image) for
-  // each batch
-  err = input->Reset();
-  if (!err.IsOk()) {
-    std::cerr << "failed resetting input: " << err << std::endl;
-    exit(1);
-  }
-
-  for (size_t i = 0; i < batch_size; ++i) {
-    nic::Error err = input->SetRaw(input_data);
+  // Only one image, then simply use synchronous infer API
+  if (inputs_data.size() == 1) {
+    // Forget any previous inputs and set input (i.e. the image) for
+    // each batch
+    err = input->Reset();
     if (!err.IsOk()) {
-      std::cerr << "failed setting input: " << err << std::endl;
+      std::cerr << "failed resetting input: " << err << std::endl;
       exit(1);
     }
-  }
 
-  err = ctx->Run(results);
-  if (!err.IsOk()) {
-    std::cerr << "failed sending infer request: " << err << std::endl;
-    exit(1);
+    for (size_t i = 0; i < batch_size; ++i) {
+      nic::Error err = input->SetRaw(inputs_data[0]);
+      if (!err.IsOk()) {
+        std::cerr << "failed setting input: " << err << std::endl;
+        exit(1);
+      }
+    }
+    results->emplace_back();
+    err = ctx->Run(&(results->back()));
+    if (!err.IsOk()) {
+      std::cerr << "failed sending infer request: " << err << std::endl;
+      exit(1);
+    }
+  } else {
+    // Given batch size N, every N images in inputs_data will be placed
+    // into one request. If the input of the last request is not filled with
+    // N images, the last image in inputs_data will be placed repeatedly to
+    // ensure that the last request also has N images.
+    // Once the request is filled with N images, the request will be sent
+    // with AsyncRun() API and the returned Request object will be stored for
+    // retrieving results after all requests are sent.
+    //
+    // Number of requests sent = ceil(number of images / N)
+    std::vector<std::shared_ptr<nic::InferContext::Request>> requests;
+    for (size_t idx = 0; idx < inputs_data.size(); idx++) {
+      // Reset the input for new request if 'idx' shows that it is
+      // at the beginning of a batch
+      if (idx % batch_size == 0) {
+        err = input->Reset();
+        if (!err.IsOk()) {
+          std::cerr << "failed resetting input: " << err << std::endl;
+          exit(1);
+        }
+      }
+
+      // Set input for the batch
+      nic::Error err = input->SetRaw(inputs_data[idx]);
+      if (!err.IsOk()) {
+        std::cerr << "failed setting input: " << err << std::endl;
+        exit(1);
+      }
+
+      // If reached the end of inputs_data. Ensure that the request input
+      // will be padded to N images with the last input
+      if ((idx + 1) == inputs_data.size()) {
+        while ((idx + 1) % batch_size != 0) {
+          nic::Error err = input->SetRaw(inputs_data.back());
+          if (!err.IsOk()) {
+            std::cerr << "failed setting input: " << err << std::endl;
+            exit(1);
+          }
+          idx++;
+        }
+      }
+
+      // Send current request only when the batch is filled
+      if ((idx + 1) % batch_size == 0) {
+        std::shared_ptr<nic::InferContext::Request> req;
+        err = ctx->AsyncRun(&req);
+        if (!err.IsOk()) {
+          std::cerr << "failed sending infer request: " << err << std::endl;
+          exit(1);
+        }
+        requests.emplace_back(std::move(req));
+      }
+    }
+
+    // Retrieve results according to the send order
+    for (auto& request : requests) {
+      results->emplace_back();
+      err = ctx->GetAsyncRunResults(&(results->back()), request, true);
+      if (!err.IsOk()) {
+        std::cerr << "failed receiving infer response: " << err << std::endl;
+        exit(1);
+      }
+    }
   }
 }
 
 void
 Postprocess(
   const std::vector<std::unique_ptr<nic::InferContext::Result>>& results,
+  const std::vector<std::string>& filenames, const size_t idx,
   const size_t batch_size, const size_t topk, bool verbose = false)
 {
   const bool show_all = verbose || ((batch_size == 1) && (topk > 1));
 
   if (show_all) {
-    std::cout << "Output probabilities:" << std::endl;
+    // Only print this at the beginning
+    if (idx == 0) {
+      std::cout << "Output probabilities:";
+    }
+    std::cout << std::endl << "Batch " << idx << ": " << std::endl;
   }
 
   if (results.size() != 1) {
@@ -239,6 +313,18 @@ Postprocess(
         << "failed reading class count for batch "
         << b << ": " << err << std::endl;
       exit(1);
+    }
+
+    if (show_all) {
+      if (b < filenames.size()) {
+        std::cout << "Image '" << filenames[b] << "': ";
+      } else {
+        std::cout << "Image '" << filenames[filenames.size()-1] << "': ";
+      }
+      // Format differently if showing more than one class
+      if (cnt > 1) {
+        std::cout << std::endl;
+      }
     }
 
     // Look at each of the classes returned in the result.
@@ -268,9 +354,13 @@ Postprocess(
       // otherwise we've seen the top prediction so go to the next
       // entry in the batch
       if (show_all) {
-       std::cout
-         << "batch " << b << ": " << cls.idx << " (\""
-         << cls.label << "\") = " << cls.value << std::endl;
+        // Format differently if showing more than one class
+        if (cnt > 1) {
+          std::cout << "    ";
+        }
+        std::cout
+          << cls.idx << " (\""
+          << cls.label << "\") = " << cls.value << std::endl;
       } else {
         break;
       }
@@ -296,7 +386,11 @@ Usage(char** argv, const std::string& msg = std::string())
   }
 
   std::cerr
-    << "Usage: " << argv[0] << " [options] <image filename>" << std::endl;
+    << "Usage: " << argv[0] << " [options] <image filename / image folder>"
+    << std::endl;
+  std::cerr
+    << "    Note that image folder should only contain image files."
+    << std::endl;
   std::cerr << "\t-v" << std::endl;
   std::cerr << "\t-b <batch size>" << std::endl;
   std::cerr << "\t-c <topk>" << std::endl;
@@ -323,6 +417,9 @@ Usage(char** argv, const std::string& msg = std::string())
   std::cerr
     << "If -x is not specified the most recent version (that is, the highest "
     << "numbered version) of the model will be used." << std::endl;
+  std::cerr
+    << "For -p, it generates file only if image file is specified."
+    << std::endl;
   std::cerr
     << "For -u, the default server URL is localhost:8000." << std::endl;
   std::cerr
@@ -513,6 +610,33 @@ ParseModel(
   }
 }
 
+void FileToInputData(
+  const std::string& filename, size_t c, size_t h, size_t w,
+  ni::ModelInput::Format format, int type1, int type3, ScaleType scale,
+  std::vector<uint8_t>* input_data)
+{
+  // Load the specified image.
+  std::ifstream file(filename);
+  std::vector<char> data;
+  file >> std::noskipws;
+  std::copy(
+    std::istream_iterator<char>(file), std::istream_iterator<char>(),
+    std::back_inserter(data));
+  if (data.empty()) {
+    std::cerr << "error: unable to read image file " << filename << std::endl;
+    exit(1);
+  }
+
+  cv::Mat img = imdecode(cv::Mat(data), 1);
+  if (img.empty()) {
+    std::cerr << "error: unable to decode image " << filename << std::endl;
+    exit(1);
+  }
+
+  // Pre-process the image to match input size expected by the model.
+  Preprocess(img, format, type1, type3, c, cv::Size(w, h), scale, input_data);
+}
+
 } //namespace
 
 int
@@ -568,9 +692,9 @@ main(int argc, char** argv)
   if (model_name.empty()) { Usage(argv, "-m flag must be specified"); }
   if (batch_size <= 0) { Usage(argv, "batch size must be > 0"); }
   if (topk <= 0) { Usage(argv, "topk must be > 0"); }
-  if (optind >= argc) { Usage(argv, "image file must be specified"); }
-
-  std::string filename(argv[optind]);
+  if (optind >= argc) {
+    Usage(argv, "image file or image folder must be specified");
+  }
 
   // Create the context for inference of the specified model. From it
   // extract and validate that the model meets the requirements for
@@ -595,40 +719,58 @@ main(int argc, char** argv)
   int type1, type3;
   ParseModel(ctx, batch_size, &c, &h, &w, &format, &type1, &type3, verbose);
 
-  // Load the specified image.
-  std::ifstream file(filename);
-  std::vector<char> data;
-  file >> std::noskipws;
-  std::copy(
-    std::istream_iterator<char>(file), std::istream_iterator<char>(),
-    std::back_inserter(data));
-  if (data.empty()) {
-    std::cerr << "error: unable to read image file " << filename << std::endl;
-    exit(1);
-  }
-
-  cv::Mat img = imdecode(cv::Mat(data), 1);
-  if (img.empty()) {
-    std::cerr << "error: unable to decode image " << filename << std::endl;
-    exit(1);
-  }
-
-  // Pre-process the image to match input size expected by the model.
-  std::vector<uint8_t> input_data;
-  Preprocess(img, format, type1, type3, c, cv::Size(w, h), scale, &input_data);
-
-  if (!preprocess_output_filename.empty()) {
-    std::ofstream output_file(preprocess_output_filename);
-    std::ostream_iterator<uint8_t> output_iterator(output_file);
-    std::copy(input_data.begin(), input_data.end(), output_iterator);
+  // Read the file(s) and preprocess them into input data accordingly
+  std::vector<std::vector<std::string>> batched_filenames;
+  std::vector<std::vector<uint8_t>> inputs_data;
+  struct stat name_stat;
+  if (stat(argv[optind], &name_stat) == 0) {
+    if (name_stat.st_mode & S_IFDIR) {
+      DIR* dir_ptr = opendir(argv[optind]);
+      struct dirent* d_ptr;
+      size_t cnt = 0;
+      while ((d_ptr = readdir(dir_ptr)) != NULL) {
+        std::string filename(d_ptr->d_name);
+        if ((filename != ".") && (filename != "..")) {
+            inputs_data.emplace_back();
+            FileToInputData(
+              std::string(argv[optind]) + "/" + filename, c, h, w, format,
+              type1, type3, scale, &(inputs_data.back()));
+            if (cnt % batch_size == 0) {
+              batched_filenames.emplace_back();
+            }
+            batched_filenames.back().push_back(filename);
+            cnt++;
+        }
+      }
+      closedir(dir_ptr);
+    } else {
+      inputs_data.emplace_back();
+      batched_filenames.emplace_back();
+      FileToInputData(
+        std::string(argv[optind]), c, h, w, format,
+        type1, type3, scale, &(inputs_data[0]));
+      batched_filenames.back().push_back(std::string(argv[optind]));
+      
+      if (!preprocess_output_filename.empty()) {
+        std::ofstream output_file(preprocess_output_filename);
+        std::ostream_iterator<uint8_t> output_iterator(output_file);
+        std::copy(
+          inputs_data[0].begin(), inputs_data[0].end(), output_iterator);
+      }
+    }
+  } else {
+    std::cerr << "Failed to find '" << std::string(argv[optind]) << "': "
+      << strerror(errno) << std::endl;
   }
 
   // Run inference to get output
-  std::vector<std::unique_ptr<nic::InferContext::Result>> results;
-  Infer(ctx, batch_size, topk, input_data, &results, verbose);
-
-  // Post-process the result to make prediction(s)
-  Postprocess(results, batch_size, topk, verbose);
-
+  std::vector<std::vector<std::unique_ptr<nic::InferContext::Result>>> results;
+  Infer(ctx, batch_size, topk, inputs_data, &results, verbose);
+  
+  // Post-process the results to make prediction(s)
+  for (size_t idx = 0; idx < results.size(); idx++) {
+    Postprocess(results[idx], batched_filenames[idx], idx, batch_size, topk,
+      verbose || (inputs_data.size() > 1));
+  }
   return 0;
 }

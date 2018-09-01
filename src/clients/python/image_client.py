@@ -28,6 +28,7 @@
 
 import argparse
 import numpy as np
+import os
 from builtins import range
 from PIL import Image
 from inference_server.api import *
@@ -173,20 +174,22 @@ def preprocess(img, format, dtype, c, h, w, scaling):
     # (like BGR) so we just assume RGB.
     return ordered
 
-def postprocess(results, batch_size, num_classes, verbose=False):
+def postprocess(results, files, idx, batch_size, num_classes, verbose=False):
     """
     Post-process results to show classifications.
     """
     show_all = verbose or ((batch_size == 1) and (num_classes > 1))
     if show_all:
-        print("Output probabilities:")
+        if idx == 0:
+            print("Output probabilities:")
+        print("batch {}:".format(idx))
 
     if len(results) != 1:
         raise Exception("expected 1 result, got " + len(results))
 
-    result = list(results.values())[0]
-    if len(result) != batch_size:
-        raise Exception("expected " + batch_size + " results, got " + len(result))
+    batched_result = list(results.values())[0]
+    if len(batched_result) != batch_size:
+        raise Exception("expected " + batch_size + " results, got " + len(batched_result))
 
     # For each result in the batch count the top prediction. Since we
     # used the same image for every entry in the batch we expect the
@@ -194,18 +197,26 @@ def postprocess(results, batch_size, num_classes, verbose=False):
     # doesn't assume that.
     counts = dict()
     predictions = dict()
-    for (batch_index, batch_result) in enumerate(result):
-        label = batch_result[0][2]
+    for (index, result) in enumerate(batched_result):
+        label = result[0][2]
         if label not in counts:
             counts[label] = 0
 
         counts[label] += 1
-        predictions[label] = batch_result[0]
+        predictions[label] = result[0]
 
         # If requested, print all the class results for the entry
         if show_all:
-            for cls in batch_result:
-                print("batch {}: {} ({}) = {}".format(batch_index, cls[0], cls[2], cls[1]))
+            if (index >= len(files)):
+                index = len(files) - 1
+            # Top 1, print compactly
+            if len(result) == 1:
+                print("Image '{}': {} ({}) = {}".format(
+                    files[index], result[0][0], result[0][2], result[0][1]))
+            else:
+                print("Image '{}':".format(files[index]))
+                for cls in result:
+                    print("    {} ({}) = {}".format(cls[0], cls[2], cls[1]))
 
     # Summary
     print("Prediction totals:")
@@ -237,7 +248,7 @@ if __name__ == '__main__':
     parser.add_argument('-p', '--preprocessed', type=str, required=False,
                         metavar='FILE', help='Write preprocessed image to specified file.')
     parser.add_argument('image_filename', type=str, nargs='?', default=None,
-                        help='Input image.')
+                        help='Input image / Input folder.')
     FLAGS = parser.parse_args()
 
     protocol = ProtocolType.from_str(FLAGS.protocol)
@@ -248,22 +259,62 @@ if __name__ == '__main__':
         FLAGS.url, protocol, FLAGS.model_name,
         FLAGS.batch_size, FLAGS.verbose)
 
-    # Load and preprocess the image
-    img = Image.open(FLAGS.image_filename)
-    input_tensor = preprocess(img, format, dtype, c, h, w, FLAGS.scaling)
-
-    if FLAGS.preprocessed is not None:
-        with open(preprocessed, "w") as file:
-            file.write(input_tensor.tobytes())
-
-    # Need 'batch_size' copies of the input tensor...
-    input_tensors = [input_tensor for b in range(FLAGS.batch_size)]
-
     ctx = InferContext(FLAGS.url, protocol,
         FLAGS.model_name, FLAGS.model_version, FLAGS.verbose)
-    results = ctx.run(
-        { input_name : input_tensors },
-        { output_name : (InferContext.ResultFormat.CLASS, FLAGS.classes) },
-        FLAGS.batch_size)
 
-    postprocess(results, FLAGS.batch_size, FLAGS.classes, FLAGS.verbose)
+    multiple_inputs = False
+    batched_filenames = []
+    results = []
+    if os.path.isdir(FLAGS.image_filename):
+        files = [f for f in os.listdir(FLAGS.image_filename)
+            if os.path.isfile(os.path.join(FLAGS.image_filename, f))]
+        multiple_inputs = (len(files) > 1)
+
+        input_tensors = []
+        request_ids = []
+        filenames = []
+        # Place every 'batch_size' number of images into one request
+        # and send it via AsyncRun() API. If the last request doesn't have
+        # 'batch_size' input tensors, pad it with the last input tensor.
+        for idx in range(len(files)):
+            filenames.append(files[idx])
+
+            img = Image.open(os.path.join(FLAGS.image_filename, files[idx]))
+            input_tensor = preprocess(img, format, dtype, c, h, w, FLAGS.scaling)
+            input_tensors.append(input_tensor)
+            if (idx + 1 == len(files)):
+                while (len(input_tensors) != FLAGS.batch_size):
+                    input_tensors.append(input_tensor)
+            # Send the request and reset input_tensors
+            if len(input_tensors) >= FLAGS.batch_size:
+                request_ids.append(ctx.async_run(
+                    { input_name : input_tensors },
+                    { output_name : (InferContext.ResultFormat.CLASS, FLAGS.classes) },
+                    FLAGS.batch_size))
+                input_tensors = []
+                batched_filenames.append(filenames)
+                filenames = []
+        # Get results by send order
+        for request_id in request_ids:
+            results.append(ctx.get_async_run_results(request_id, True))
+    else:
+        batched_filenames.append([FLAGS.image_filename])
+        # Load and preprocess the image
+        img = Image.open(FLAGS.image_filename)
+        input_tensor = preprocess(img, format, dtype, c, h, w, FLAGS.scaling)
+
+        if FLAGS.preprocessed is not None:
+            with open(preprocessed, "w") as file:
+                file.write(input_tensor.tobytes())
+
+        # Need 'batch_size' copies of the input tensor...
+        input_tensors = [input_tensor for b in range(FLAGS.batch_size)]
+
+        results.append(ctx.run(
+            { input_name : input_tensors },
+            { output_name : (InferContext.ResultFormat.CLASS, FLAGS.classes) },
+            FLAGS.batch_size))
+
+    for idx in range(len(results)):
+        postprocess(results[idx], batched_filenames[idx], idx,
+            FLAGS.batch_size, FLAGS.classes, FLAGS.verbose or multiple_inputs)

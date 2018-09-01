@@ -26,8 +26,8 @@
 
 FROM ubuntu:16.04
 
-# Build for Python 2.7 (options are 2.7 or 3.5)
-ARG PYVER=2.7
+# Build for Python 3.5
+ARG PYVER=3.5
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \

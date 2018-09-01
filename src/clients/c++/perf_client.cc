@@ -130,6 +130,7 @@ SignalHandler(int signum)
 }
 
 typedef struct PerformanceStatusStruct {
+  uint32_t concurrency;
   size_t batch_size;
   // Request count and elapsed time measured by server
   uint64_t server_request_count;
@@ -234,12 +235,13 @@ public:
     const bool verbose, const bool profile, const int32_t batch_size,
     const double stable_offset,
     const uint64_t measurement_window_ms, const size_t max_measurement_count,
+    const bool async,
     const std::string& model_name, const int model_version,
     const std::string& url, const ProtocolType protocol)
   {
     manager->reset(new ConcurrencyManager(
       verbose, profile, batch_size, stable_offset, measurement_window_ms,
-      max_measurement_count, model_name, model_version, url, protocol));
+      max_measurement_count, async, model_name, model_version, url, protocol));
     (*manager)->pause_index_.reset(new size_t(0));
     (*manager)->request_timestamps_.reset(new TimestampVector());
     return nic::Error(ni::RequestStatusCode::SUCCESS);
@@ -258,6 +260,8 @@ public:
   nic::Error Step(
     PerfStatus& status_summary, const size_t concurrent_request_count)
   {
+    status_summary.concurrency = concurrent_request_count;
+
     // Adjust concurrency level
     {
       // Acquire lock first to make sure no worker thread is trying to pause
@@ -268,18 +272,40 @@ public:
     wake_signal_.notify_all();
 
     // Create new threads if we can not provide concurrency needed
-    while (concurrent_request_count > threads_.size()) {
-      // Launch new thread for inferencing
-      threads_status_.emplace_back(
-        new nic::Error(ni::RequestStatusCode::SUCCESS));
-      threads_context_stat_.emplace_back(
-        new nic::InferContext::Stat());
-      size_t new_thread_index = threads_.size();
-      threads_.emplace_back(
-        &ConcurrencyManager::Infer, this,
-        threads_status_.back(), threads_context_stat_.back(),
-        request_timestamps_, pause_index_, new_thread_index);
+    if (!async_) {
+      while (concurrent_request_count > threads_.size()) {
+        // Launch new thread for inferencing
+        threads_status_.emplace_back(
+          new nic::Error(ni::RequestStatusCode::SUCCESS));
+        threads_context_stat_.emplace_back(
+          new nic::InferContext::Stat());
+        size_t new_thread_index = threads_.size();
+        threads_.emplace_back(
+          &ConcurrencyManager::Infer, this,
+          threads_status_.back(), threads_context_stat_.back(),
+          request_timestamps_, pause_index_, new_thread_index);
+      }
+    } else {
+      // TODO: check how much extra latency async infer introduces.
+      // One worker thread still need to prepare the requests
+      // in sequence, intuitively, it seems like the concurrency level
+      // may not be as stable as using multiple worker threads. Maybe having
+      // multiple worker threads and each handles some number of requests?
+
+      // One worker thread is sufficient for async mode
+      if (threads_.size() == 0) {
+        // Launch new thread for inferencing
+        threads_status_.emplace_back(
+          new nic::Error(ni::RequestStatusCode::SUCCESS));
+        threads_context_stat_.emplace_back(
+          new nic::InferContext::Stat());
+        threads_.emplace_back(
+          &ConcurrencyManager::AsyncInfer, this,
+          threads_status_.back(), threads_context_stat_.back(),
+          request_timestamps_, pause_index_);
+      }
     }
+
 
     std::cout
       << "Request concurrency: " << concurrent_request_count << std::endl;
@@ -353,13 +379,14 @@ public:
       }
     } while((!early_exit) && (infer_per_sec.size() < max_measurement_count_));
     if (early_exit) {
-      return nic::Error(ni::RequestStatusCode::INTERNAL, "Received exit signal.");
+      return
+        nic::Error(ni::RequestStatusCode::INTERNAL, "Received exit signal.");
     } else if (!stable) {
-      return nic::Error(
-        ni::RequestStatusCode::INTERNAL,
-        "Failed to obtain stable measurement within " +
-        std::to_string(max_measurement_count_) + " measurement windows." \
-        " Please try to increase the time window.");
+      std::cerr
+        << "Failed to obtain stable measurement within "
+        << max_measurement_count_ << " measurement windows for concurrency "
+        << concurrent_request_count << ". Please try to "
+        << "increase the time window." << std::endl;
     }
 
     return err;
@@ -373,13 +400,13 @@ private:
     const bool verbose, const bool profile, const int32_t batch_size,
     const double stable_offset,
     const int32_t measurement_window_ms, const size_t max_measurement_count,
-    const std::string& model_name, const int model_version,
+    const bool async, const std::string& model_name, const int model_version,
     const std::string& url, const ProtocolType protocol)
     : verbose_(verbose), profile_(profile), batch_size_(batch_size),
       stable_offset_(stable_offset),
       measurement_window_ms_(measurement_window_ms),
       max_measurement_count_(max_measurement_count),
-      model_name_(model_name), model_version_(model_version),
+      async_(async), model_name_(model_name), model_version_(model_version),
       url_(url), protocol_(protocol)
   {
   }
@@ -541,7 +568,7 @@ private:
             max_latency_ns = request_latency;
           tol_latency_ns += request_latency;
           tol_square_latency_us +=
-            (request_latency / 1000) * (request_latency / 1000);
+            (request_latency * request_latency) / (1000 * 1000);
           valid_timestamp_count++;
         }
       }
@@ -570,10 +597,11 @@ private:
     uint64_t expected_square_latency_us =
       tol_square_latency_us / valid_timestamp_count;
     uint64_t square_avg_latency_us =
-      (summary.client_avg_latency_ns / 1000) *
-      (summary.client_avg_latency_ns / 1000);
-    uint64_t variance_us = (expected_square_latency_us - square_avg_latency_us);
-    summary.std_us = (uint64_t)(sqrt(variance_us));
+      (summary.client_avg_latency_ns * summary.client_avg_latency_ns) /
+      (1000 * 1000);
+    uint64_t var_us = (expected_square_latency_us > square_avg_latency_us) ?
+      (expected_square_latency_us - square_avg_latency_us) : 0;
+    summary.std_us = (uint64_t)(sqrt(var_us));
 
     size_t completed_count =
       end_stat.completed_request_count - start_stat.completed_request_count;
@@ -771,6 +799,154 @@ private:
     }
   }
 
+  // Function for worker threads
+  void
+  AsyncInfer(
+    std::shared_ptr<nic::Error> err,
+    std::shared_ptr<nic::InferContext::Stat> stat,
+    std::shared_ptr<TimestampVector> timestamp,
+    std::shared_ptr<size_t> pause_index)
+  {
+    // Create the context for inference of the specified model.
+    std::unique_ptr<nic::InferContext> ctx;
+    if (protocol_ == ProtocolType::HTTP) {
+      *err = nic::InferHttpContext::Create(
+        &ctx, url_, model_name_, model_version_, false);
+    } else {
+      *err = nic::InferGrpcContext::Create(
+        &ctx, url_, model_name_, model_version_, false);
+    }
+    if (!err->IsOk()) {
+      return;
+    }
+
+    if (batch_size_ > ctx->MaxBatchSize()) {
+      *err =
+        nic::Error(
+          ni::RequestStatusCode::INVALID_ARG,
+          "expecting batch size <= " + std::to_string(ctx->MaxBatchSize()) +
+          " for model '" + ctx->ModelName() + "'");
+      return;
+    }
+
+    // Prepare context for 'batch_size' batches. Request that all
+    // outputs be returned.
+    std::unique_ptr<nic::InferContext::Options> options;
+    *err = nic::InferContext::Options::Create(&options);
+    if (!err->IsOk()) {
+      return;
+    }
+
+    options->SetBatchSize(batch_size_);
+    for (const auto& output : ctx->Outputs()) {
+      options->AddRawResult(output);
+    }
+
+    *err = ctx->SetRunOptions(*options);
+    if (!err->IsOk()) {
+      return;
+    }
+
+    // Create a randomly initialized buffer that is large enough to
+    // provide the largest needed input. We (re)use this buffer for all
+    // input values.
+    size_t max_input_byte_size = 0;
+    for (const auto& input : ctx->Inputs()) {
+      max_input_byte_size = std::max(max_input_byte_size, input->ByteSize());
+    }
+
+    std::vector<uint8_t> input_buf(max_input_byte_size);
+    for (size_t i = 0; i < input_buf.size(); ++i) {
+      input_buf[i] = rand();
+    }
+
+    // Initialize inputs to use random values...
+    for (const auto& input : ctx->Inputs()) {
+      *err = input->Reset();
+      if (!err->IsOk()) {
+        return;
+      }
+
+      for (size_t i = 0; i < batch_size_; ++i) {
+        *err = input->SetRaw(&input_buf[0], input->ByteSize());
+        if (!err->IsOk()) {
+          return;
+        }
+      }
+    }
+
+    std::map<uint64_t, struct timespec> requests_start_time;
+    // run inferencing until receiving exit signal to maintain server load.
+    do {
+      // Run inference to get output
+      std::vector<std::unique_ptr<nic::InferContext::Result>> results;
+      std::shared_ptr<nic::InferContext::Request> request;
+
+      // Create async requests such that the number of ongoing requests
+      // matches the concurrency level (here is '*pause_index')
+      while (requests_start_time.size() < *pause_index) {
+        struct timespec start_time;
+        clock_gettime(CLOCK_MONOTONIC, &start_time);
+        *err = ctx->AsyncRun(&request);
+        if (!err->IsOk()) {
+          return;
+        }
+        requests_start_time.emplace(request->Id(), start_time);
+      }
+
+      if (requests_start_time.size() < *pause_index) {
+        std::cerr << "This message shouldn't be printed twice in a row" << std::endl;
+      }
+
+      // Get any request that is completed and
+      // record the end time of the request
+      while (true) {
+        nic::Error tmp_err;
+        if (requests_start_time.size() >= *pause_index) {
+          tmp_err = ctx->GetReadyAsyncRequest(&request, true);
+        } else {
+          // Don't wait if worker needs to maintain concurrency level
+          // Just make sure all completed requests at the moment
+          // are measured correctly
+          tmp_err = ctx->GetReadyAsyncRequest(&request, false);
+        }
+
+        if (tmp_err.Code() == ni::RequestStatusCode::UNAVAILABLE) {
+          break;
+        } else if (!tmp_err.IsOk()) {
+          *err = tmp_err;
+          return;
+        }
+        *err = ctx->GetAsyncRunResults(&results, request, true);
+
+        struct timespec end_time;
+        clock_gettime(CLOCK_MONOTONIC, &end_time);
+
+        if (!err->IsOk()) {
+          return;
+        }
+
+        auto itr = requests_start_time.find(request->Id());
+        struct timespec start_time = itr->second;
+        requests_start_time.erase(itr);
+
+        // Add the request timestamp to shared vector with proper locking
+        status_report_mutex_.lock();
+        // Critical section
+        request_timestamps_->emplace_back(std::make_pair(start_time, end_time));
+        // Update its InferContext statistic to shared Stat pointer
+        ctx->GetStat(stat.get());
+        status_report_mutex_.unlock();
+      }
+
+      // Stop inferencing if an early exit has been signaled.
+    } while (!early_exit);
+    if (verbose_) {
+      std::cout
+        << "Async worker thread received exit signal" << std::endl;
+    }
+  }
+
   // Used for measurement
   nic::Error Measure(PerfStatus& status_summary)
   {
@@ -831,6 +1007,7 @@ private:
   double stable_offset_;
   uint64_t measurement_window_ms_;
   size_t max_measurement_count_;
+  bool async_;
   std::string model_name_;
   int model_version_;
   std::string url_;
@@ -970,6 +1147,7 @@ Usage(char** argv, const std::string& msg = std::string())
   std::cerr << "\t-b <batch size>" << std::endl;
   std::cerr << "\t-t <number of concurrent requests>" << std::endl;
   std::cerr << "\t-d" << std::endl;
+  std::cerr << "\t-a" << std::endl;
   std::cerr << "\t-l <latency threshold (in msec)>" << std::endl;
   std::cerr << "\t-c <maximum concurrency>" << std::endl;
   std::cerr << "\t-s <deviation threshold for stable measurement"
@@ -988,6 +1166,10 @@ Usage(char** argv, const std::string& msg = std::string())
     << "The -d flag enables dynamic concurrent request count where the number"
     << " of concurrent requests will increase linearly until the request"
     << " latency is above the threshold set (see -l)." << std::endl;
+  std::cerr
+    << "The -a flag changes the way to maintain concurrency level from"
+    << " sending synchronous requests to sending asynchrnous requests."
+    << std::endl;
   std::cerr
     << "For -t, it indicates the number of starting concurrent requests if -d"
     << " flag is set." << std::endl;
@@ -1035,6 +1217,7 @@ main(int argc, char** argv)
   bool verbose = false;
   bool profile = false;
   bool dynamic_concurrency_mode = false;
+  bool profiling_asynchronous_infer = false;
   uint64_t latency_threshold_ms = 0;
   int32_t batch_size = 1;
   int32_t concurrent_request_count = 1;
@@ -1050,7 +1233,7 @@ main(int argc, char** argv)
 
   // Parse commandline...
   int opt;
-  while ((opt = getopt(argc, argv, "vndc:u:m:x:b:t:p:i:l:r:s:f:")) != -1) {
+  while ((opt = getopt(argc, argv, "vndac:u:m:x:b:t:p:i:l:r:s:f:")) != -1) {
     switch (opt) {
       case 'v':
         verbose = true;
@@ -1097,6 +1280,9 @@ main(int argc, char** argv)
       case 'f':
         filename = optarg;
         break;
+      case 'a':
+        profiling_asynchronous_infer = true;
+        break;
       case '?':
         Usage(argv);
         break;
@@ -1123,6 +1309,7 @@ main(int argc, char** argv)
   err = ConcurrencyManager::Create(
     &manager, verbose, profile, batch_size, stable_offset,
     measurement_window_ms, max_measurement_count,
+    profiling_asynchronous_infer,
     model_name, model_version, url, protocol);
   if (!err.IsOk()) {
     std::cerr << err << std::endl;
@@ -1181,24 +1368,28 @@ main(int argc, char** argv)
       << "Inferences/Second vs. Client Average Batch Latency" << std::endl;
     if (!filename.empty()) {
       ofs
-        << "Inferences/Second,Client Send,Network+Server Send/Recv,Server Wait,"
+        << "Concurrency,Inferences/Second,Client Send,"
+        << "Network+Server Send/Recv,Server Wait,"
         << "Server Compute,Client Recv"
         << std::endl;
     }
 
-    // Sort summary results in order of increasing infer/sec.
-    std::sort(
-      summary.begin(), summary.end(),
-      [] (const PerfStatus& a, const PerfStatus& b) -> bool {
-        return a.client_infer_per_sec < b.client_infer_per_sec;
-      });
-
     for (PerfStatus& status : summary) {
       std::cout
-        << status.client_infer_per_sec << " infer/sec" << std::setw(12)
+        << "Concurrency: " << status.concurrency << ", "
+        << status.client_infer_per_sec << " infer/sec, latency "
         << (status.client_avg_latency_ns / 1000) << " usec" << std::endl;
+    }
 
-      if (!filename.empty()) {
+    if (!filename.empty()) {
+      // Sort summary results in order of increasing infer/sec.
+      std::sort(
+        summary.begin(), summary.end(),
+        [] (const PerfStatus& a, const PerfStatus& b) -> bool {
+              return a.client_infer_per_sec < b.client_infer_per_sec;
+            });
+
+      for (PerfStatus& status : summary) {
         uint64_t avg_run_wait_ns =
           status.server_run_wait_time_ns / status.server_request_count;
         uint64_t avg_run_ns =
@@ -1208,6 +1399,7 @@ main(int argc, char** argv)
           status.client_avg_send_time_ns - status.client_avg_receive_time_ns;
 
         ofs
+          << status.concurrency << ","
           << status.client_infer_per_sec << ","
           << (status.client_avg_send_time_ns / 1000) << ","
           << (avg_network_misc_ns / 1000) << ","

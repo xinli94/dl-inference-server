@@ -203,6 +203,7 @@ InferContext::Options::Create(std::unique_ptr<InferContext::Options>* options)
 class InputImpl : public InferContext::Input {
 public:
   InputImpl(const ModelInput& mio);
+  InputImpl(const InputImpl& obj);
   ~InputImpl() = default;
 
   const std::string& Name() const override { return mio_.name(); }
@@ -241,6 +242,18 @@ InputImpl::InputImpl(const ModelInput& mio)
   : mio_(mio), byte_size_(GetSize(mio)),
     batch_size_(0), bufs_idx_(0), buf_pos_(0)
 {
+}
+
+InputImpl::InputImpl(const InputImpl& obj)
+  : mio_(obj.mio_), byte_size_(obj.byte_size_),
+    batch_size_(obj.batch_size_), bufs_idx_(0), buf_pos_(0)
+{
+  // Set raw inputs
+  for (size_t batch_idx = 0; batch_idx < batch_size_; batch_idx++) {
+    const uint8_t* data_ptr;
+    obj.GetRaw(batch_idx, &data_ptr);
+    SetRaw(data_ptr, byte_size_);
+  }
 }
 
 Error
@@ -691,11 +704,113 @@ InferContext::RequestTimers::Record(Kind kind)
 
 //==============================================================================
 
+class RequestImpl : public InferContext::Request {
+public:
+  virtual ~RequestImpl() = default;
+
+  uint64_t Id() const { return id_; };
+
+  // Initialize 'requested_results_' according to 'batch_size' and
+  // 'requested_outs' as the placeholder for the results
+  Error InitializeRequestedResults(
+    const std::vector<std::shared_ptr<InferContext::Output>>& requested_outs,
+    const size_t batch_size);
+
+  // Return the results of the request. 'ready_' should always be checked
+  // before calling GetResults() to ensure the request has been completed.
+  virtual Error GetResults(
+    std::vector<std::unique_ptr<InferContext::Result>>* results) = 0;
+
+protected:
+  RequestImpl(const uint64_t id);
+
+  // Helper function called after inference to set non-RAW results in
+  // 'requested_results_'.
+  Error PostRunProcessing(
+    std::vector<std::unique_ptr<InferContext::Result>>& results,
+    const InferResponseHeader& infer_response);
+
+  friend class InferContext;
+
+  // Identifier seen by user
+  uint64_t id_;
+
+  // Internal identifier for asynchronous call
+  uintptr_t run_index_;
+
+  // Indicating if the request has been completed.
+  bool ready_;
+
+  // The timer for infer request.
+  InferContext::RequestTimers timer_;
+
+  // Results being collected for the requested outputs from inference
+  // server response.
+  std::vector<std::unique_ptr<InferContext::Result>> requested_results_;
+
+  // Current positions within output vectors when processing response.
+  size_t result_pos_idx_;
+};
+
+RequestImpl::RequestImpl(const uint64_t id)
+    : id_(id), ready_(false), result_pos_idx_(0)
+{
+}
+
+Error
+RequestImpl::InitializeRequestedResults(
+  const std::vector<std::shared_ptr<InferContext::Output>>& requested_outs,
+  const size_t batch_size)
+{
+  // Initialize the results vector to collect the requested results.
+  requested_results_.clear();
+  for (const auto& io : requested_outs) {
+    std::unique_ptr<ResultImpl>
+      rp(
+        new ResultImpl(
+          io, batch_size,
+          reinterpret_cast<OutputImpl*>(io.get())->ResultFormat()));
+    requested_results_.emplace_back(std::move(rp));
+  }
+  return Error::Success;
+}
+
+Error
+RequestImpl::PostRunProcessing(
+  std::vector<std::unique_ptr<InferContext::Result>>& results,
+  const InferResponseHeader& infer_response)
+{
+  // At this point, the RAW requested results have their result values
+  // set. Now need to initialize non-RAW results.
+  for (auto& rr : results) {
+    ResultImpl* r = reinterpret_cast<ResultImpl*>(rr.get());
+    r->SetModel(infer_response.model_name(), infer_response.model_version());
+    switch (r->ResultFormat()) {
+      case InferContext::Result::ResultFormat::RAW:
+        r->ResetCursors();
+        break;
+
+      case InferContext::Result::ResultFormat::CLASS: {
+        for (const auto& ir : infer_response.output()) {
+          if (ir.name() == r->GetOutput()->Name()) {
+            r->SetClassResult(ir);
+            break;
+          }
+        }
+        break;
+      }
+    }
+  }
+  return Error::Success;
+}
+
+//==============================================================================
+
 InferContext::InferContext(
   const std::string& model_name, int model_version, bool verbose)
   : model_name_(model_name), model_version_(model_version),
     verbose_(verbose), total_input_byte_size_(0), batch_size_(0),
-    input_pos_idx_(0), result_pos_idx_(0)
+    async_request_id_(0), worker_(), exiting_(true)
 {
 }
 
@@ -766,7 +881,6 @@ InferContext::SetRunOptions(const InferContext::Options& boptions)
   }
 
   requested_outputs_.clear();
-  requested_results_.clear();
 
   for (const auto& p : options.Outputs()) {
     const std::shared_ptr<Output>& output = p.first;
@@ -795,136 +909,6 @@ InferContext::GetStat(Stat* stat)
     context_stat_.cumulative_total_request_time_ns;
   stat->cumulative_send_time_ns = context_stat_.cumulative_send_time_ns;
   stat->cumulative_receive_time_ns = context_stat_.cumulative_receive_time_ns;
-  return Error::Success;
-}
-
-Error
-InferContext::PreRunProcessing()
-{
-  infer_response_buffer_.clear();
-
-  // Reset all the position indicators so that we send all inputs
-  // correctly.
-  request_status_.Clear();
-  input_pos_idx_ = 0;
-  result_pos_idx_ = 0;
-
-  for (auto& io : inputs_) {
-    reinterpret_cast<InputImpl*>(io.get())->PrepareForRequest();
-  }
-
-  // Initialize the results vector to collect the requested results.
-  requested_results_.clear();
-  for (const auto& io : requested_outputs_) {
-    std::unique_ptr<ResultImpl>
-      rp(
-        new ResultImpl(
-          io, batch_size_,
-          reinterpret_cast<OutputImpl*>(io.get())->ResultFormat()));
-    requested_results_.emplace_back(std::move(rp));
-  }
-  return Error::Success;
-}
-
-Error
-InferContext::PostRunProcessing(InferResponseHeader& infer_response)
-{
-  // At this point, the RAW requested results have their result values
-  // set. Now need to initialize non-RAW results.
-  for (auto& rr : requested_results_) {
-    ResultImpl* r = reinterpret_cast<ResultImpl*>(rr.get());
-    r->SetModel(infer_response.model_name(), infer_response.model_version());
-    switch (r->ResultFormat()) {
-      case Result::ResultFormat::RAW:
-        r->ResetCursors();
-        break;
-
-      case Result::ResultFormat::CLASS: {
-        for (const auto& ir : infer_response.output()) {
-          if (ir.name() == r->GetOutput()->Name()) {
-            r->SetClassResult(ir);
-            break;
-          }
-        }
-        break;
-      }
-    }
-  }
-  return Error::Success;
-}
-
-Error
-InferContext::GetNextInput(uint8_t* buf, size_t size, size_t* input_bytes)
-{
-  *input_bytes = 0;
-
-  while ((size > 0) && (input_pos_idx_ < inputs_.size())) {
-    InputImpl* io =
-      reinterpret_cast<InputImpl*>(inputs_[input_pos_idx_].get());
-    size_t ib = 0;
-    bool eoi = false;
-    Error err = io->GetNext(buf, size, &ib, &eoi);
-    if (!err.IsOk()) {
-      return err;
-    }
-    // If input was completely read then move to the next.
-    if (eoi) {
-      input_pos_idx_++;
-    }
-    if (ib != 0) {
-      *input_bytes += ib;
-      size -= ib;
-      buf += ib;
-    }
-  }
-  // Sent all input bytes
-  if (input_pos_idx_ >= inputs_.size()) {
-    request_timer_.Record(RequestTimers::Kind::SEND_END);
-  }
-
-  return Error::Success;
-}
-
-Error
-InferContext::SetNextRawResult(
-  const uint8_t* buf, size_t size, size_t* result_bytes)
-{
-  *result_bytes = 0;
-
-  if (request_timer_.receive_start_.tv_sec == 0) {
-    request_timer_.Record(RequestTimers::Kind::RECEIVE_START);
-  }
-
-  while ((size > 0) && (result_pos_idx_ < requested_results_.size())) {
-    ResultImpl* io =
-      reinterpret_cast<ResultImpl*>(requested_results_[result_pos_idx_].get());
-    size_t ob = 0;
-
-    // Only try to read raw result for RAW
-    if (io->ResultFormat() == Result::ResultFormat::RAW) {
-      Error err = io->SetNextRawResult(buf, size, &ob);
-      if (!err.IsOk()) {
-        return err;
-      }
-    }
-
-    // If output couldn't accept any more bytes then move to the next.
-    if (ob == 0) {
-      result_pos_idx_++;
-    } else {
-      *result_bytes += ob;
-      size -= ob;
-      buf += ob;
-    }
-  }
-
-  // If there is any bytes left then they belong to the response
-  // header, since all the RAW results have been filled.
-  if (size > 0) {
-    infer_response_buffer_.append(reinterpret_cast<const char*>(buf), size);
-    *result_bytes += size;
-  }
-
   return Error::Success;
 }
 
@@ -961,6 +945,84 @@ Error InferContext::UpdateStat(const RequestTimers& timer)
   context_stat_.cumulative_total_request_time_ns += request_time_ns;
   context_stat_.cumulative_send_time_ns += send_time_ns;
   context_stat_.cumulative_receive_time_ns += receive_time_ns;
+  return Error::Success;
+}
+
+Error
+InferContext::GetReadyAsyncRequest(
+    std::shared_ptr<Request>* request, bool wait)
+{
+  if (ongoing_async_requests_.size() == 0) {
+    return Error(
+      RequestStatusCode::UNAVAILABLE,
+      "No asynchronous requests have been sent");
+  }
+
+  Error err;
+  std::unique_lock<std::mutex> lock(mutex_);
+  cv_.wait(lock,
+    [&err, request, this, wait] {
+      for (auto& ongoing_async_request : this->ongoing_async_requests_) {
+        if (std::static_pointer_cast<RequestImpl>(
+              ongoing_async_request.second)->ready_) {
+          *request = ongoing_async_request.second;
+          err = Error::Success;
+          return true;
+        }
+      }
+
+      if (!wait) {
+        err = Error(RequestStatusCode::UNAVAILABLE, "No completed request.");
+        return true;
+      } else {
+        return false;
+      }
+    });
+
+  lock.unlock();
+  return err;
+}
+
+Error
+InferContext::IsRequestReady(
+  const std::shared_ptr<Request>& async_request, bool wait)
+{
+  if (ongoing_async_requests_.size() == 0) {
+    return Error(
+      RequestStatusCode::INVALID_ARG,
+      "No asynchronous requests have been sent");
+  }
+
+  std::shared_ptr<RequestImpl> request =
+    std::static_pointer_cast<RequestImpl>(async_request);
+
+  auto itr = ongoing_async_requests_.find(request->run_index_);
+  if (itr == ongoing_async_requests_.end()) {
+    return Error(
+      RequestStatusCode::INVALID_ARG, "No matched asynchronous request found.");
+  }
+
+  Error err = Error::Success;
+  std::unique_lock<std::mutex> lock(mutex_);
+  cv_.wait(lock,
+    [&err, &request, wait] {
+      if (!request->ready_) {
+        if (wait) {
+          return false;
+        } else {
+          err = Error(RequestStatusCode::UNAVAILABLE, "Request is not ready.");
+        }
+      }
+      return true;
+    });
+  
+  if (!err.IsOk()) {
+    lock.unlock();
+    return err;
+  } else {
+    ongoing_async_requests_.erase(itr->first);
+  }
+  lock.unlock();
   return Error::Success;
 }
 
@@ -1208,12 +1270,237 @@ ServerStatusHttpContext::ResponseHandler(
 
 //==============================================================================
 
+class HttpRequestImpl : public RequestImpl {
+public:
+  HttpRequestImpl(
+    const uint64_t id,
+    const std::vector<std::shared_ptr<InferContext::Input>> inputs);
+
+  ~HttpRequestImpl();
+
+  // Initialize the request for HTTP transfer on top of
+  // RequestImpl.InitializeRequestedResults()
+  Error InitializeRequest(
+    const std::vector<std::shared_ptr<InferContext::Output>>& requested_outputs,
+    const size_t batch_size);
+
+  // Copy into 'buf' up to 'size' bytes of input data. Return the
+  // actual amount copied in 'input_bytes'.
+  Error GetNextInput(uint8_t* buf, size_t size, size_t* input_bytes);
+
+  // Copy into the context 'size' bytes of result data from
+  // 'buf'. Return the actual amount copied in 'result_<bytes'.
+  Error SetNextRawResult(
+    const uint8_t* buf, size_t size, size_t* result_bytes);
+
+  // @see RequestImpl.GetResults()
+  Error GetResults(
+    std::vector<std::unique_ptr<InferContext::Result>>* results) override;
+
+private:
+  friend class InferHttpContext;
+
+  // Pointer to easy handle that is processing the request
+  CURL* easy_handle_;
+
+  // Pointer to the list of the HTTP request header, keep it such that it will
+  // be valid during the transfer and can be freed once transfer is completed.
+  struct curl_slist * header_list_;
+
+  // Status code for the HTTP request.
+  CURLcode http_status_;
+
+  // RequestStatus received in server response.
+  RequestStatus request_status_;
+
+  // Buffer that accumulates the serialized InferResponseHeader at the
+  // end of the body.
+  std::string infer_response_buffer_;
+
+  // The inputs for the request. For asynchronous request, it should
+  // be a deep copy of the inputs set by the user in case the user modifies
+  // them for another request during the HTTP transfer. 
+  std::vector<std::shared_ptr<InferContext::Input>> inputs_;
+
+  // Current positions within input vectors when sending request.
+  size_t input_pos_idx_;
+};
+
+HttpRequestImpl::HttpRequestImpl(
+  const uint64_t id,
+  const std::vector<std::shared_ptr<InferContext::Input>> inputs)
+    : RequestImpl(id), easy_handle_(curl_easy_init()), header_list_(NULL),
+      inputs_(inputs), input_pos_idx_(0)
+{
+  if (easy_handle_ != NULL) {
+    run_index_ = reinterpret_cast<uintptr_t>(easy_handle_);
+  }
+}
+
+HttpRequestImpl::~HttpRequestImpl()
+{
+  if (easy_handle_ != NULL) {
+    curl_easy_cleanup(easy_handle_);
+  }
+}
+
+Error
+HttpRequestImpl::InitializeRequest(
+  const std::vector<std::shared_ptr<InferContext::Output>>& requested_outputs,
+  const size_t batch_size)
+{
+  infer_response_buffer_.clear();
+
+  // Reset all the position indicators so that we send all inputs
+  // correctly.
+  request_status_.Clear();
+
+  for (auto& io : inputs_) {
+    reinterpret_cast<InputImpl*>(io.get())->PrepareForRequest();
+  }
+
+  input_pos_idx_ = 0;
+  result_pos_idx_ = 0;
+
+  return RequestImpl::InitializeRequestedResults(requested_outputs, batch_size);
+}
+
+
+Error
+HttpRequestImpl::GetNextInput(uint8_t* buf, size_t size, size_t* input_bytes)
+{
+  *input_bytes = 0;
+
+  while ((size > 0) && (input_pos_idx_ < inputs_.size())) {
+    InputImpl* io =
+      reinterpret_cast<InputImpl*>(inputs_[input_pos_idx_].get());
+    size_t ib = 0;
+    bool eoi = false;
+    Error err = io->GetNext(buf, size, &ib, &eoi);
+    if (!err.IsOk()) {
+      return err;
+    }
+
+    // If input was completely read then move to the next.
+    if (eoi) {
+      input_pos_idx_++;
+    } 
+    if (ib != 0) {
+      *input_bytes += ib;
+      size -= ib;
+      buf += ib;
+    }
+  }
+
+  // Sent all input bytes
+  if (input_pos_idx_ >= inputs_.size()) {
+    timer_.Record(InferContext::RequestTimers::Kind::SEND_END);
+  }
+
+  return Error::Success;
+}
+
+Error
+HttpRequestImpl::SetNextRawResult(
+    const uint8_t* buf, size_t size, size_t* result_bytes)
+{
+  *result_bytes = 0;
+
+  while ((size > 0) && (result_pos_idx_ < requested_results_.size())) {
+    ResultImpl* io =
+      reinterpret_cast<ResultImpl*>(requested_results_[result_pos_idx_].get());
+    size_t ob = 0;
+
+    // Only try to read raw result for RAW
+    if (io->ResultFormat() == InferContext::Result::ResultFormat::RAW) {
+      Error err = io->SetNextRawResult(buf, size, &ob);
+      if (!err.IsOk()) {
+        return err;
+      }
+    }
+
+    // If output couldn't accept any more bytes then move to the next.
+    if (ob == 0) {
+      result_pos_idx_++;
+    } else {
+      *result_bytes += ob;
+      size -= ob;
+      buf += ob;
+    }
+  }
+
+  // If there is any bytes left then they belong to the response
+  // header, since all the RAW results have been filled.
+  if (size > 0) {
+    infer_response_buffer_.append(reinterpret_cast<const char*>(buf), size);
+    *result_bytes += size;
+  }
+
+  return Error::Success;
+}
+
+Error
+HttpRequestImpl::GetResults(
+  std::vector<std::unique_ptr<InferContext::Result>>* results)
+{
+  InferResponseHeader infer_response;
+
+  if (http_status_ != CURLE_OK) {
+    curl_slist_free_all(header_list_);
+    requested_results_.clear();
+    return
+      Error(
+        RequestStatusCode::INTERNAL, "HTTP client failed: " +
+        std::string(curl_easy_strerror(http_status_)));
+  }
+
+  // Must use 64-bit integer with curl_easy_getinfo
+  int64_t http_code;
+  curl_easy_getinfo(easy_handle_, CURLINFO_RESPONSE_CODE, &http_code);
+
+  curl_slist_free_all(header_list_);
+
+  // Should have a request status, if not then create an error status.
+  if (request_status_.code() == RequestStatusCode::INVALID) {
+    request_status_.Clear();
+    request_status_.set_code(RequestStatusCode::INTERNAL);
+    request_status_.set_msg("infer request did not return status");
+  }
+
+  // If request has failing HTTP status or the request's explicit
+  // status is not SUCCESS, then signal an error.
+  if ((http_code != 200) ||
+      (request_status_.code() != RequestStatusCode::SUCCESS)) {
+    requested_results_.clear();
+    return Error(request_status_);
+  }
+
+  // The infer response header should be available...
+  if (infer_response_buffer_.empty()) {
+    requested_results_.clear();
+    return
+      Error(
+        RequestStatusCode::INTERNAL,
+        "infer request did not return result header");
+  }
+
+  infer_response.ParseFromString(infer_response_buffer_);
+
+  PostRunProcessing(requested_results_, infer_response);
+
+  results->swap(requested_results_);
+
+  return Error(request_status_);
+}
+
+//==============================================================================
+
 Error
 InferHttpContext::Create(
   std::unique_ptr<InferContext>* ctx, const std::string& server_url,
   const std::string& model_name, int model_version, bool verbose)
 {
-  InferHttpContext* ctx_ptr =
+  InferHttpContext* ctx_ptr = 
     new InferHttpContext(server_url, model_name, model_version, verbose);
 
   // Get status of the model and create the inputs and outputs.
@@ -1248,6 +1535,10 @@ InferHttpContext::Create(
     }
   }
 
+  // Create request context for synchronous request.
+  ctx_ptr->sync_request_.reset(
+    static_cast<Request*>(new HttpRequestImpl(0, ctx_ptr->inputs_)));
+
   if (err.IsOk()) {
     ctx->reset(static_cast<InferContext*>(ctx_ptr));
   } else {
@@ -1260,7 +1551,8 @@ InferHttpContext::Create(
 InferHttpContext::InferHttpContext(
   const std::string& server_url, const std::string& model_name,
   int model_version, bool verbose)
-  : InferContext(model_name, model_version, verbose), curl_(nullptr)
+  : InferContext(model_name, model_version, verbose),
+    multi_handle_(curl_multi_init())
 {
   // Process url for HTTP request
   // URL doesn't contain the version portion if using the latest version.
@@ -1272,139 +1564,144 @@ InferHttpContext::InferHttpContext(
 
 InferHttpContext::~InferHttpContext()
 {
-  if (curl_ != nullptr) {
-    curl_easy_cleanup(curl_);
+  exiting_ = true;
+  // thread not joinable if AsyncRun() is not called
+  // (it is default constructed thread before the first AsyncRun() call)
+  if (worker_.joinable()) {
+    cv_.notify_all();
+    worker_.join();
+  }
+
+  if (multi_handle_ != NULL) {
+    for (auto& request : ongoing_async_requests_) {
+      CURL* easy_handle =
+        std::static_pointer_cast<HttpRequestImpl>(request.second)->easy_handle_;
+      // Just remove, easy_cleanup will be done in ~HttpRequestImpl()
+      curl_multi_remove_handle(multi_handle_, easy_handle);
+    }
+    curl_multi_cleanup(multi_handle_);
   }
 }
 
 Error
 InferHttpContext::Run(std::vector<std::unique_ptr<Result>>* results)
 {
-  request_timer_.Reset();
-  InferResponseHeader infer_response;
-
-  PreRunProcessing();
+  std::shared_ptr<HttpRequestImpl> sync_request = 
+    std::static_pointer_cast<HttpRequestImpl>(sync_request_);
 
   if (!curl_global.Status().IsOk()) {
     return curl_global.Status();
   }
 
-  if (curl_ == nullptr) {
-    curl_ = curl_easy_init();
-    std::string full_url = url_ + "?format=binary";
-    curl_easy_setopt(curl_, CURLOPT_URL, full_url.c_str());
-    curl_easy_setopt(curl_, CURLOPT_USERAGENT, "libcurl-agent/1.0");
-    curl_easy_setopt(curl_, CURLOPT_POST, 1L);
-    // Avoid delaying sending on small TCP packets (end of input tensors)
-    // Otherwise, ~40 ms delay happens when reusing the connection.
-    curl_easy_setopt(curl_, CURLOPT_TCP_NODELAY, 1L);
-    if (verbose_) {
-      curl_easy_setopt(curl_, CURLOPT_VERBOSE, 1L);
-    }
+  Error err = PreRunProcessing(sync_request_);
 
-    // request data provided by RequestProvider()
-    curl_easy_setopt(curl_, CURLOPT_READFUNCTION, RequestProvider);
-    curl_easy_setopt(curl_, CURLOPT_READDATA, this);
-
-    // response headers handled by ResponseHeaderHandler()
-    curl_easy_setopt(curl_, CURLOPT_HEADERFUNCTION, ResponseHeaderHandler);
-    curl_easy_setopt(curl_, CURLOPT_HEADERDATA, this);
-
-    // response data handled by ResponseHandler()
-    curl_easy_setopt(curl_, CURLOPT_WRITEFUNCTION, ResponseHandler);
-    curl_easy_setopt(curl_, CURLOPT_WRITEDATA, this);
-
-    // set the expected POST size. If you want to POST large amounts of
-    // data, consider CURLOPT_POSTFIELDSIZE_LARGE
-    curl_easy_setopt(curl_, CURLOPT_POSTFIELDSIZE, total_input_byte_size_);
+  if (!err.IsOk()) {
+    return err;
   }
-  CURL* curl = curl_;
-  if (!curl) {
+
+  // Take run time
+  sync_request->timer_.Reset();
+  sync_request->timer_.Record(RequestTimers::Kind::REQUEST_START);
+  sync_request->timer_.Record(RequestTimers::Kind::SEND_START);
+  sync_request->http_status_ = curl_easy_perform(sync_request->easy_handle_);
+  sync_request->timer_.Record(RequestTimers::Kind::RECEIVE_END);
+  sync_request->timer_.Record(RequestTimers::Kind::REQUEST_END);
+
+  err = UpdateStat(sync_request->timer_);
+  if (!err.IsOk()) {
+    std::cerr << "Failed to update context stat: " << err << std::endl;
+  }
+  return sync_request->GetResults(results);
+}
+
+Error
+InferHttpContext::AsyncRun(std::shared_ptr<Request>* async_request)
+{
+  if (!multi_handle_) {
+    return Error(
+      RequestStatusCode::INTERNAL, "failed to start HTTP asynchronous client");
+  } else if (exiting_) {
+    // abusing variable here, exiting_ is true either when destructor is called
+    // or the worker thread is not acutally created.
+    exiting_ = false;
+    worker_ = std::thread(&InferHttpContext::AsyncTransfer, this);
+  }
+
+  // Make a copy of the current inputs
+  std::vector<std::shared_ptr<Input>> inputs;
+  for (const auto& io : inputs_) {
+    InputImpl* input = reinterpret_cast<InputImpl*>(io.get());
+    inputs.emplace_back(std::make_shared<InputImpl>(*input));
+  }
+
+  HttpRequestImpl* current_context =
+    new HttpRequestImpl(async_request_id_++, inputs);
+  async_request->reset(static_cast<Request*>(current_context));
+
+  if (!current_context->easy_handle_) {
     return
       Error(RequestStatusCode::INTERNAL, "failed to initialize HTTP client");
   }
 
+  Error err = PreRunProcessing(*async_request);
 
-  // Headers to specify input and output tensors
-  infer_request_str_.clear();
-  infer_request_str_ =
-    std::string(kInferRequestHTTPHeader) + ":" +
-    infer_request_.ShortDebugString();
-  struct curl_slist *list = NULL;
-  list = curl_slist_append(list, "Expect:");
-  list = curl_slist_append(list, "Content-Type: application/octet-stream");
-  list = curl_slist_append(list, infer_request_str_.c_str());
-  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, list);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
 
-  // Take run time
-  request_timer_.Record(RequestTimers::Kind::REQUEST_START);
-  request_timer_.Record(RequestTimers::Kind::SEND_START);
-  CURLcode res = curl_easy_perform(curl);
-  request_timer_.Record(RequestTimers::Kind::RECEIVE_END);
-  request_timer_.Record(RequestTimers::Kind::REQUEST_END);
+    auto insert_result = ongoing_async_requests_.emplace(
+        std::make_pair(
+          reinterpret_cast<uintptr_t>(current_context->easy_handle_),
+          *async_request));
 
-  if (res != CURLE_OK) {
-    curl_slist_free_all(list);
-    curl_easy_cleanup(curl);
-    requested_results_.clear();
-    return
-      Error(
-        RequestStatusCode::INTERNAL, "HTTP client failed: " +
-        std::string(curl_easy_strerror(res)));
-  }
-
-  // Must use 64-bit integer with curl_easy_getinfo
-  int64_t http_code;
-  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-
-  curl_slist_free_all(list);
-
-  // Should have a request status, if not then create an error status.
-  if (request_status_.code() == RequestStatusCode::INVALID) {
-    request_status_.Clear();
-    request_status_.set_code(RequestStatusCode::INTERNAL);
-    request_status_.set_msg("infer request did not return status");
-  }
-
-  // If request has failing HTTP status or the request's explicit
-  // status is not SUCCESS, then signal an error.
-  if ((http_code != 200) ||
-      (request_status_.code() != RequestStatusCode::SUCCESS)) {
-    requested_results_.clear();
-    return Error(request_status_);
-  }
-
-  // The infer response header should be available...
-  if (infer_response_buffer_.empty()) {
-    requested_results_.clear();
-    return
-      Error(
+    if (!insert_result.second) {
+      return Error(
         RequestStatusCode::INTERNAL,
-        "infer request did not return result header");
+        "Failed to insert new asynchronous request context.");
+    }
+
+    curl_multi_add_handle(multi_handle_, current_context->easy_handle_);
+    current_context->timer_.Reset();
+    current_context->timer_.Record(RequestTimers::Kind::REQUEST_START);
+    current_context->timer_.Record(RequestTimers::Kind::SEND_START);
   }
 
-  infer_response.ParseFromString(infer_response_buffer_);
+  cv_.notify_all();
+  return Error(RequestStatusCode::SUCCESS);
+}
 
-  PostRunProcessing(infer_response);
+Error
+InferHttpContext::GetAsyncRunResults(
+  std::vector<std::unique_ptr<Result>>* results,
+  const std::shared_ptr<Request>& async_request, bool wait)
+{
+  Error err = IsRequestReady(async_request, wait);
+  if (!err.IsOk()) {
+    return err;
+  }
+  std::shared_ptr<HttpRequestImpl> http_request =
+    std::static_pointer_cast<HttpRequestImpl>(async_request);
 
-  results->swap(requested_results_);
-  Error err = UpdateStat(request_timer_);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    curl_multi_remove_handle(multi_handle_, http_request->easy_handle_);
+  }
+  
+  err = UpdateStat(http_request->timer_);
   if (!err.IsOk()) {
     std::cerr << "Failed to update context stat: " << err << std::endl;
   }
-
-  return Error(request_status_);
+  return http_request->GetResults(results);
 }
 
 size_t
 InferHttpContext::RequestProvider(
   void* contents, size_t size, size_t nmemb, void* userp)
 {
-  InferHttpContext* ctx = reinterpret_cast<InferHttpContext*>(userp);
+  HttpRequestImpl* request = reinterpret_cast<HttpRequestImpl*>(userp);
 
   size_t input_bytes = 0;
   Error err =
-    ctx->GetNextInput(
+    request->GetNextInput(
       reinterpret_cast<uint8_t*>(contents), size * nmemb, &input_bytes);
   if (!err.IsOk()) {
     std::cerr << "RequestProvider: " << err << std::endl;
@@ -1418,7 +1715,7 @@ size_t
 InferHttpContext::ResponseHeaderHandler(
   void* contents, size_t size, size_t nmemb, void* userp)
 {
-  InferHttpContext* ctx = reinterpret_cast<InferHttpContext*>(userp);
+  HttpRequestImpl* request = reinterpret_cast<HttpRequestImpl*>(userp);
   char* buf = reinterpret_cast<char*>(contents);
   size_t byte_size = size * nmemb;
 
@@ -1432,8 +1729,8 @@ InferHttpContext::ResponseHeaderHandler(
     if (idx < byte_size) {
       std::string hdr(buf + idx + 1, byte_size - idx - 1);
       if (!google::protobuf::TextFormat::ParseFromString(
-          hdr, &ctx->request_status_)) {
-        ctx->request_status_.Clear();
+          hdr, &request->request_status_)) {
+        request->request_status_.Clear();
       }
     }
   }
@@ -1445,11 +1742,15 @@ size_t
 InferHttpContext::ResponseHandler(
   void* contents, size_t size, size_t nmemb, void* userp)
 {
-  InferHttpContext* ctx = reinterpret_cast<InferHttpContext*>(userp);
+  HttpRequestImpl* request = reinterpret_cast<HttpRequestImpl*>(userp);
   size_t result_bytes = 0;
 
+  if (request->timer_.receive_start_.tv_sec == 0) {
+    request->timer_.Record(RequestTimers::Kind::RECEIVE_START);
+  }
+
   Error err =
-    ctx->SetNextRawResult(
+    request->SetNextRawResult(
       reinterpret_cast<uint8_t*>(contents), size * nmemb, &result_bytes);
   if (!err.IsOk()) {
     std::cerr << "ResponseHandler: " << err << std::endl;
@@ -1457,6 +1758,120 @@ InferHttpContext::ResponseHandler(
   }
 
   return result_bytes;
+}
+
+Error
+InferHttpContext::PreRunProcessing(std::shared_ptr<Request>& request)
+{
+  std::shared_ptr<HttpRequestImpl> http_request = 
+    std::static_pointer_cast<HttpRequestImpl>(request);
+
+  http_request->InitializeRequest(requested_outputs_, batch_size_);
+  
+  CURL* curl = http_request->easy_handle_;
+  if (!curl) {
+    return
+      Error(RequestStatusCode::INTERNAL, "failed to initialize HTTP client");
+  }
+
+  std::string full_url = url_ + "?format=binary";
+  curl_easy_setopt(curl, CURLOPT_URL, full_url.c_str());
+  curl_easy_setopt(curl, CURLOPT_USERAGENT, "libcurl-agent/1.0");
+  curl_easy_setopt(curl, CURLOPT_POST, 1L);
+  curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, 1L);
+  if (verbose_) {
+    curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+  }
+
+  // request data provided by RequestProvider()
+  curl_easy_setopt(curl, CURLOPT_READFUNCTION, RequestProvider);
+  curl_easy_setopt(curl, CURLOPT_READDATA, http_request.get());
+
+  // response headers handled by ResponseHeaderHandler()
+  curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, ResponseHeaderHandler);
+  curl_easy_setopt(curl, CURLOPT_HEADERDATA, http_request.get());
+
+  // response data handled by ResponseHandler()
+  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, ResponseHandler);
+  curl_easy_setopt(curl, CURLOPT_WRITEDATA, http_request.get());
+
+  // set the expected POST size. If you want to POST large amounts of
+  // data, consider CURLOPT_POSTFIELDSIZE_LARGE
+  curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, total_input_byte_size_);
+
+  // Headers to specify input and output tensors
+  infer_request_str_.clear();
+  infer_request_str_ =
+    std::string(kInferRequestHTTPHeader) + ":" +
+    infer_request_.ShortDebugString();
+  struct curl_slist *list = NULL;
+  list = curl_slist_append(list, "Expect:");
+  list = curl_slist_append(list, "Content-Type: application/octet-stream");
+  list = curl_slist_append(list, infer_request_str_.c_str());
+  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, list);
+
+  // The list should be freed after the request
+  http_request->header_list_ = list;
+
+  return Error::Success;
+}
+
+void
+InferHttpContext::AsyncTransfer()
+{
+  int place_holder = 0;
+  CURLMsg* msg = NULL;
+  do {
+    bool has_completed = false;
+    // sleep if no work is available
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock,
+      [this] {
+        if (this->exiting_) {
+          return true;
+        }
+        // wake up if at least one request is not ready
+        for (auto& ongoing_async_request : this->ongoing_async_requests_) {
+          if (std::static_pointer_cast<HttpRequestImpl>(
+              ongoing_async_request.second)->ready_ == false) {
+            return true;
+          }
+        }
+        return false;
+      });
+    curl_multi_perform(multi_handle_, &place_holder);
+    while ((msg = curl_multi_info_read(multi_handle_, &place_holder))) {
+      // update request status
+      uintptr_t identifier = reinterpret_cast<uintptr_t>(msg->easy_handle);
+      auto itr = ongoing_async_requests_.find(identifier);
+      // This shouldn't happen
+      if (itr == ongoing_async_requests_.end()) {
+        fprintf(stderr, "Unexpected error: received completed request that" \
+          " is not in the list of asynchronous requests.\n");
+        curl_multi_remove_handle(multi_handle_, msg->easy_handle);
+        curl_easy_cleanup(msg->easy_handle);
+        continue;
+      }
+      std::shared_ptr<HttpRequestImpl> http_request = 
+        std::static_pointer_cast<HttpRequestImpl>(itr->second);
+
+      if (msg->msg != CURLMSG_DONE) {
+        // Something wrong happened.
+        fprintf(stderr, "Unexpected error: received CURLMsg=%d\n", msg->msg);
+      } else {
+        http_request->timer_.Record(RequestTimers::Kind::RECEIVE_END);
+        http_request->timer_.Record(RequestTimers::Kind::REQUEST_END);
+      }
+      http_request->http_status_ = msg->data.result;
+      http_request->ready_ = true;
+      has_completed = true;
+    }
+    lock.unlock();
+    // if it has completed tasks, send signal in case the main thread is waiting
+    if (has_completed) {
+      cv_.notify_all();
+    }
+  } while (!exiting_);
 }
 
 //==============================================================================
@@ -1690,6 +2105,102 @@ ServerStatusGrpcContext::GetServerStatus(ServerStatus* server_status)
 
 //==============================================================================
 
+class GrpcRequestImpl : public RequestImpl {
+public:
+  GrpcRequestImpl(const uint64_t id, const uintptr_t run_index);
+
+  // @see RequestImpl.GetResults()
+  Error GetResults(
+    std::vector<std::unique_ptr<InferContext::Result>>* results) override;
+
+private:
+  // Unmarshall and process 'grpc_response_' into 'requested_results'
+  Error SetRawResult();
+
+  friend class InferGrpcContext;
+  
+  // Variables for gRPC call
+  grpc::ClientContext grpc_context_;
+  grpc::Status grpc_status_;
+  InferResponse grpc_response_;
+};
+
+GrpcRequestImpl::GrpcRequestImpl(const uint64_t id, const uintptr_t run_index)
+    : RequestImpl(id)
+{
+  run_index_ = run_index;
+}
+
+Error
+GrpcRequestImpl::SetRawResult()
+{
+  result_pos_idx_ = 0;
+  for (std::string output : grpc_response_.raw_output()) {
+    const uint8_t* buf = reinterpret_cast<uint8_t*>(&output[0]);
+    size_t size = output.size();
+    size_t result_bytes = 0;
+
+    // Not using loop as in HTTP Infer because the output size should match
+    if ((size > 0) && (result_pos_idx_ < requested_results_.size())) {
+      ResultImpl* io =
+        reinterpret_cast<ResultImpl*>(
+          requested_results_[result_pos_idx_].get());
+
+      // Only try to read raw result for RAW
+      if (io->ResultFormat() == InferContext::Result::ResultFormat::RAW) {
+        Error err = io->SetNextRawResult(buf, size, &result_bytes);
+        if (!err.IsOk()) {
+          return err;
+        }
+      }
+    }
+
+    if (result_bytes != size) {
+      return Error(RequestStatusCode::INVALID,
+        "Written bytes doesn't match received bytes.");
+    }
+
+    result_pos_idx_++;
+  }
+
+  return Error::Success;
+}
+
+Error
+GrpcRequestImpl::GetResults(
+  std::vector<std::unique_ptr<InferContext::Result>>* results)
+{
+  results->clear();
+  InferResponseHeader infer_response;
+
+  Error err(RequestStatusCode::SUCCESS);
+  if (grpc_status_.ok()) {
+    infer_response.Swap(grpc_response_.mutable_meta_data());
+    err = Error(grpc_response_.request_status());
+    if (err.IsOk()) {
+      Error set_err = SetRawResult();
+      if (!set_err.IsOk()) {
+        return set_err;
+      }
+    }
+  } else {
+    // Something wrong with the gRPC conncection
+    err = Error(RequestStatusCode::INTERNAL, "gRPC client failed: " +
+      std::to_string(grpc_status_.error_code()) + ": " +
+      grpc_status_.error_message());
+  }
+
+  // Only continue to process result if gRPC status is SUCCESS
+  if (err.Code() == RequestStatusCode::SUCCESS) {
+    PostRunProcessing(requested_results_, infer_response);
+    results->swap(requested_results_);
+  }
+
+  return err;
+}
+
+//==============================================================================
+
 Error
 InferGrpcContext::Create(
   std::unique_ptr<InferContext>* ctx, const std::string& server_url,
@@ -1697,6 +2208,10 @@ InferGrpcContext::Create(
 {
   InferGrpcContext* ctx_ptr =
       new InferGrpcContext(server_url, model_name, model_version, verbose);
+
+  // Create request context for synchronous request.
+  ctx_ptr->sync_request_.reset(
+    static_cast<Request*>(new GrpcRequestImpl(0, 0)));
 
   // Get status of the model and create the inputs and outputs.
   std::unique_ptr<ServerStatusContext> sctx;
@@ -1747,32 +2262,153 @@ InferGrpcContext::InferGrpcContext(
 {
 }
 
+InferGrpcContext::~InferGrpcContext()
+{
+  exiting_ = true;
+  // thread not joinable if AsyncRun() is not called
+  // (it is default constructed thread before the first AsyncRun() call)
+  if (worker_.joinable()) {
+    cv_.notify_all();
+    worker_.join();
+  }
+
+  // Close complete queue and drain its content
+  async_request_completion_queue_.Shutdown();
+  bool has_next = true;
+  void* tag;
+  bool ok;
+  do {
+    has_next = async_request_completion_queue_.Next(&tag, &ok);
+  } while (has_next);
+}
+
 Error
 InferGrpcContext::Run(std::vector<std::unique_ptr<Result>>* results)
 {
-  request_timer_.Reset();
-  results->clear();
-
-  Error grpc_status;
-  InferResponseHeader infer_response;
-
-  PreRunProcessing();
-
-  InferRequest request;
-  InferResponse response;
   grpc::ClientContext context;
 
+  std::shared_ptr<GrpcRequestImpl> sync_request = 
+    std::static_pointer_cast<GrpcRequestImpl>(sync_request_);
+  sync_request->InitializeRequestedResults(requested_outputs_, batch_size_);
+  
+  sync_request->timer_.Reset();
   // Use send timer to measure time for marshalling infer request
-  request_timer_.Record(RequestTimers::Kind::SEND_START);
+  sync_request->timer_.Record(RequestTimers::Kind::SEND_START);
+  PreRunProcessing(sync_request_);
+  sync_request->timer_.Record(RequestTimers::Kind::SEND_END);
 
-  request.set_model_name(model_name_);
-  request.set_version(std::to_string(model_version_));
-  request.mutable_meta_data()->MergeFrom(infer_request_);
+  sync_request->timer_.Record(RequestTimers::Kind::REQUEST_START);
+  sync_request->grpc_status_ =
+    stub_->Infer(&context, request_, &sync_request->grpc_response_);
+  sync_request->timer_.Record(RequestTimers::Kind::REQUEST_END);
 
-  while (input_pos_idx_ < inputs_.size()) {
+  sync_request->timer_.Record(RequestTimers::Kind::RECEIVE_START);
+  Error request_status = sync_request->GetResults(results);
+  sync_request->timer_.Record(RequestTimers::Kind::RECEIVE_END);
+
+  Error err = UpdateStat(sync_request->timer_);
+  if (!err.IsOk()) {
+    std::cerr << "Failed to update context stat: " << err << std::endl;
+  }
+  
+  return request_status;
+}
+
+Error
+InferGrpcContext::AsyncRun(std::shared_ptr<Request>* async_request)
+{
+  if (exiting_) {
+    exiting_ = false;
+    worker_ = std::thread(&InferGrpcContext::AsyncTransfer, this);
+  }
+  uintptr_t run_index;
+  if (reusable_slot_.empty()) {
+    run_index = ongoing_async_requests_.size();
+  } else {
+    run_index = reusable_slot_.back();
+    reusable_slot_.pop_back();
+  }
+
+  GrpcRequestImpl* current_context =
+    new GrpcRequestImpl(async_request_id_++, run_index);
+  async_request->reset(static_cast<Request*>(current_context));
+
+  auto insert_result = ongoing_async_requests_.emplace(
+      std::make_pair(run_index, *async_request));
+
+  if (!insert_result.second) {
+    return Error(
+      RequestStatusCode::INTERNAL,
+      "Failed to insert new asynchronous request context.");
+  }
+
+  current_context->timer_.Reset();
+  current_context->timer_.Record(RequestTimers::Kind::SEND_START);
+  PreRunProcessing(*async_request);
+  current_context->timer_.Record(RequestTimers::Kind::SEND_END);
+
+  current_context->timer_.Record(RequestTimers::Kind::REQUEST_START);
+  std::unique_ptr<grpc::ClientAsyncResponseReader<InferResponse>> rpc(
+    stub_->PrepareAsyncInfer(
+      &current_context->grpc_context_, request_,
+      &async_request_completion_queue_));
+
+  rpc->StartCall();
+  
+  rpc->Finish(
+    &current_context->grpc_response_,
+    &current_context->grpc_status_,
+    (void*)run_index);
+
+  cv_.notify_all();
+  return Error(RequestStatusCode::SUCCESS);
+}
+
+Error
+InferGrpcContext::GetAsyncRunResults(
+  std::vector<std::unique_ptr<Result>>* results,
+  const std::shared_ptr<Request>& async_request, bool wait)
+{
+  Error err = IsRequestReady(async_request, wait);
+  if (!err.IsOk()) {
+    return err;
+  }
+
+  std::shared_ptr<GrpcRequestImpl> grpc_request =
+    std::static_pointer_cast<GrpcRequestImpl>(async_request);
+  
+  reusable_slot_.push_back(grpc_request->run_index_);
+  grpc_request->timer_.Record(RequestTimers::Kind::RECEIVE_START);
+  Error request_status = grpc_request->GetResults(results);
+  grpc_request->timer_.Record(RequestTimers::Kind::RECEIVE_END);
+  err = UpdateStat(grpc_request->timer_);
+  if (!err.IsOk()) {
+    std::cerr << "Failed to update context stat: " << err << std::endl;
+  }
+  return request_status;
+}
+
+Error
+InferGrpcContext::PreRunProcessing(std::shared_ptr<Request>& request)
+{
+  std::shared_ptr<GrpcRequestImpl> grpc_request = 
+    std::static_pointer_cast<GrpcRequestImpl>(request);
+  grpc_request->InitializeRequestedResults(requested_outputs_, batch_size_);
+
+  for (auto& io : inputs_) {
+    reinterpret_cast<InputImpl*>(io.get())->PrepareForRequest();
+  }
+
+  request_.Clear();
+  request_.set_model_name(model_name_);
+  request_.set_version(std::to_string(model_version_));
+  request_.mutable_meta_data()->MergeFrom(infer_request_);
+
+  size_t input_pos_idx = 0;
+  while (input_pos_idx < inputs_.size()) {
     InputImpl* io =
-      reinterpret_cast<InputImpl*>(inputs_[input_pos_idx_].get());
-    std::string* new_input = request.add_raw_input();
+      reinterpret_cast<InputImpl*>(inputs_[input_pos_idx].get());
+    std::string* new_input = request_.add_raw_input();
     // Append all batches of one input together
     for (size_t batch_idx = 0; batch_idx < batch_size_; batch_idx++) {
       const uint8_t* data_ptr;
@@ -1780,58 +2416,61 @@ InferGrpcContext::Run(std::vector<std::unique_ptr<Result>>* results)
       new_input->append(
         reinterpret_cast<const char*>(data_ptr), io->ByteSize());
     }
-    input_pos_idx_++;
+    input_pos_idx++;
   }
+  return Error::Success;
+}
 
-  request_timer_.Record(RequestTimers::Kind::SEND_END);
+void
+InferGrpcContext::AsyncTransfer()
+{
+  do {
+    // sleep if no work is available
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock,
+      [this] {
+        if (this->exiting_) {
+          return true;
+        }
+        // wake up if at least one request is not ready
+        for (auto& ongoing_async_request : this->ongoing_async_requests_) {
+          if (std::static_pointer_cast<GrpcRequestImpl>(
+              ongoing_async_request.second)->ready_ == false) {
+            return true;
+          }
+        }
+        return false;
+      });
+    lock.unlock();
+    // gRPC async APIs are thread-safe https://github.com/grpc/grpc/issues/4486
+    if (!exiting_) {
+      size_t got;
+      bool ok = true;
+      bool status = async_request_completion_queue_.Next((void**)(&got), &ok);
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!ok) {
+          fprintf(stderr, "Unexpected not ok on client side.");
+        }
+        if (!status) {
+          fprintf(stderr, "Completion queue is closed.");
+        }
+        auto itr = ongoing_async_requests_.find(got);
+        if (itr == ongoing_async_requests_.end()) {
+          fprintf(stderr, "Unexpected error: received completed request that" \
+            " is not in the list of asynchronous requests.\n");
+          continue;
+        }
 
-  // Take run time
-  // (we can only take run time for gRPC because when bytes get sent/received
-  //  is encapsulated.)
-  request_timer_.Record(RequestTimers::Kind::REQUEST_START);
-  grpc::Status status = stub_->Infer(&context, request, &response);
-  request_timer_.Record(RequestTimers::Kind::REQUEST_END);
-
-  if (status.ok()) {
-    // Use send timer to measure time for unmarshalling infer response
-    request_timer_.Record(RequestTimers::Kind::RECEIVE_START);
-    infer_response.Swap(response.mutable_meta_data());
-    request_status_.Swap(response.mutable_request_status());
-    // Reset position index for sanity check, this will be used
-    // in InferContext::SetNextRawResult
-    result_pos_idx_ = 0;
-    for (std::string output : response.raw_output()) {
-      size_t size = output.size();
-      size_t result_bytes = 0;
-      SetNextRawResult(
-        reinterpret_cast<uint8_t*>(&output[0]), size, &result_bytes);
-      if (result_bytes != size) {
-        grpc_status = Error(RequestStatusCode::INVALID,
-          "Written bytes doesn't match received bytes.");
+        std::shared_ptr<GrpcRequestImpl> grpc_request =
+          std::static_pointer_cast<GrpcRequestImpl>(itr->second);
+        grpc_request->timer_.Record(RequestTimers::Kind::REQUEST_END);
+        grpc_request->ready_ = true;
       }
+      // send signal in case the main thread is waiting
+      cv_.notify_all();
     }
-    grpc_status = Error(request_status_);
-    request_timer_.Record(RequestTimers::Kind::RECEIVE_END);
-  } else {
-    // Something wrong with the gRPC conncection
-    grpc_status = Error(RequestStatusCode::INTERNAL, "gRPC client failed: " +
-      std::to_string(status.error_code()) + ": " + status.error_message());
-  }
-
-  // Only continue to process result if gRPC status is SUCCESS
-  if (grpc_status.Code() != RequestStatusCode::SUCCESS) {
-    return grpc_status;
-  }
-
-  PostRunProcessing(infer_response);
-
-  results->swap(requested_results_);
-  Error err = UpdateStat(request_timer_);
-  if (!err.IsOk()) {
-    std::cerr << "Failed to update context stat: " << err << std::endl;
-  }
-
-  return Error(request_status_);
+  } while (!exiting_);
 }
 
 //==============================================================================

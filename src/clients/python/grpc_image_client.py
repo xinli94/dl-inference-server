@@ -28,6 +28,7 @@
 
 import argparse
 import numpy as np
+import os
 from builtins import range
 from PIL import Image
 
@@ -185,21 +186,23 @@ def preprocess(img, format, dtype, c, h, w, scaling):
     # (like BGR) so we just assume RGB.
     return ordered
 
-def postprocess(results, batch_size, num_classes, verbose=False):
+def postprocess(results, files, idx, batch_size, num_classes, verbose=False):
     """
     Post-process results to show classifications.
     """
     show_all = verbose or ((batch_size == 1) and (num_classes > 1))
     if show_all:
-        print("Output probabilities:")
+        if idx == 0:
+            print("Output probabilities:")
+        print("batch {}:".format(idx))
 
     if len(results) != 1:
         raise Exception("expected 1 result, got " + str(len(results)))
 
-    result = results[0].batch_classes
-    if len(result) != batch_size:
+    batched_result = results[0].batch_classes
+    if len(batched_result) != batch_size:
         raise Exception("expected " + str(batch_size) +
-            " results, got " + str(len(result)))
+            " results, got " + str(len(batched_result)))
 
     # For each result in the batch count the top prediction. Since we
     # used the same image for every entry in the batch we expect the
@@ -207,18 +210,27 @@ def postprocess(results, batch_size, num_classes, verbose=False):
     # doesn't assume that.
     counts = dict()
     predictions = dict()
-    for (batch_index, batch_result) in enumerate(result):
-        label = batch_result.cls[0].label
+    for (index, result) in enumerate(batched_result):
+        label = result.cls[0].label
         if label not in counts:
             counts[label] = 0
 
         counts[label] += 1
-        predictions[label] = batch_result.cls[0]
+        predictions[label] = result.cls[0]
 
         # If requested, print all the class results for the entry
         if show_all:
-            for cls in batch_result.cls:
-                print("batch {}: {} ({}) = {}".format(batch_index, cls.idx, cls.label, cls.value))
+            if (index >= len(files)):
+                index = len(files) - 1
+            # Top 1, print compactly
+            if len(result.cls) == 1:
+                print("Image '{}': {} ({}) = {}".format(
+                    files[index], result.cls[0].idx,
+                    result.cls[0].label, result.cls[0].value))
+            else:
+                print("Image '{}':".format(files[index]))
+                for cls in result.cls:
+                    print("    {} ({}) = {}".format(cls.idx, cls.label, cls.value))
 
     # Summary
     print("Prediction totals:")
@@ -263,36 +275,90 @@ if __name__ == '__main__':
     input_name, output_name, c, h, w, format, dtype, output_size = parse_model(
         response, FLAGS.model_name, FLAGS.batch_size, FLAGS.verbose)
 
-    # Load and preprocess the image
-    img = Image.open(FLAGS.image_filename)
-    input_tensor = preprocess(img, format, dtype, c, h, w, FLAGS.scaling)
-
-    if FLAGS.preprocessed is not None:
-        with open(preprocessed, "w") as file:
-            file.write(input_tensor.tobytes())
-
     # Prepare request for Infer gRPC
+    # The meta data part can be reused across requests
     request = grpc_service_pb2.InferRequest()
     request.model_name = FLAGS.model_name
     if FLAGS.model_version is None:
         FLAGS.model_version = "" # using lastest version
     request.version = FLAGS.model_version
     request.meta_data.batch_size = FLAGS.batch_size
-    request.meta_data.input.add(
-        name=input_name, byte_size=input_tensor.size * input_tensor.itemsize)
     output_message = api_pb2.InferRequestHeader.Output()
     output_message.name = output_name
     output_message.byte_size = output_size
     output_message.cls.count = FLAGS.classes
     request.meta_data.output.extend([output_message])
-    # Need 'batch_size' copies of the input tensor...
-    input_bytes = input_tensor.tobytes()
-    for b in range(FLAGS.batch_size-1):
-        input_bytes += input_tensor.tobytes()
-    request.raw_input.extend([input_bytes])
 
-    # Call and receive response from Infer gRPC
-    response = grpc_stub.Infer(request)
-    print(response.request_status)
+    multiple_inputs = False
+    batched_filenames = []
+    responses = []
+    if os.path.isdir(FLAGS.image_filename):
+        files = [f for f in os.listdir(FLAGS.image_filename)
+            if os.path.isfile(os.path.join(FLAGS.image_filename, f))]
+        multiple_inputs = (len(files) > 1)
 
-    postprocess(response.meta_data.output, FLAGS.batch_size, FLAGS.classes, FLAGS.verbose)
+        input_bytes = None
+        requests = []
+        filenames = []
+        # Place every 'batch_size' number of images into one request
+        # and send it via AsyncRun() API. If the last request doesn't have
+        # 'batch_size' input tensors, pad it with the last input tensor.
+        cnt = 0
+        for idx in range(len(files)):
+            filenames.append(files[idx])
+
+            img = Image.open(os.path.join(FLAGS.image_filename, files[idx]))
+            input_tensor = preprocess(img, format, dtype, c, h, w, FLAGS.scaling)
+            # This field can not be set until input tensor is obtained
+            if len(request.meta_data.input) == 0:
+                request.meta_data.input.add(
+                    name=input_name, byte_size=input_tensor.size * input_tensor.itemsize)
+            if input_bytes is None:
+                input_bytes = input_tensor.tobytes()
+            else:
+                input_bytes += input_tensor.tobytes()
+            cnt += 1
+            if (idx + 1 == len(files)):
+                while (cnt != FLAGS.batch_size):
+                    input_bytes += input_tensor.tobytes()
+                    cnt += 1
+            # Send the request and reset input_tensors
+            if cnt >= FLAGS.batch_size:
+                del request.raw_input[:]
+                request.raw_input.extend([input_bytes])
+                # Call and receive future response from async Infer gRPC
+                requests.append(grpc_stub.Infer.future(request))
+                input_bytes = None
+                cnt = 0
+                batched_filenames.append(filenames)
+                filenames = []
+        # Get results by send order
+        for request in requests:
+            responses.append(request.result())
+    else:
+        batched_filenames.append([FLAGS.image_filename])
+        # Load and preprocess the image
+        img = Image.open(FLAGS.image_filename)
+        input_tensor = preprocess(img, format, dtype, c, h, w, FLAGS.scaling)
+        request.meta_data.input.add(
+            name=input_name, byte_size=input_tensor.size * input_tensor.itemsize)
+
+        if FLAGS.preprocessed is not None:
+            with open(preprocessed, "w") as file:
+                file.write(input_tensor.tobytes())
+
+        # Need 'batch_size' copies of the input tensor...
+        input_bytes = input_tensor.tobytes()
+        for b in range(FLAGS.batch_size-1):
+            input_bytes += input_tensor.tobytes()
+        request.raw_input.extend([input_bytes])
+
+        # Call and receive response from Infer gRPC
+        responses.append(grpc_stub.Infer(request))
+        print(responses[0].request_status)
+
+    # TODO: Update postprocess
+    for idx in range(len(responses)):
+        postprocess(responses[idx].meta_data.output, batched_filenames[idx],
+            idx, FLAGS.batch_size, FLAGS.classes,
+            FLAGS.verbose or multiple_inputs)

@@ -25,9 +25,12 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #pragma once
 
+#include <condition_variable>
 #include <grpcpp/grpcpp.h>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 #include <curl/curl.h>
 #include "src/core/api.pb.h"
@@ -213,6 +216,10 @@ protected:
 // be invoked as soon as the previous completes. The returned result
 // objects are owned by the caller and may be retained and accessed
 // even after the InferContext object is destroyed.
+//
+// Also note that AsyncRun() and GetAsyncRunStatus() calls are not thread-safe.
+// What's more, calling one method while the other one is running will result in
+// undefined behavior given that they will modify the shared data internally.
 //
 // For more parallelism multiple InferContext objects can access the
 // same inference server with no serialization requirements across
@@ -420,7 +427,26 @@ public:
     // @return Error object indicating success or failure
     virtual Error AddClassResult(
       const std::shared_ptr<InferContext::Output>& output, uint64_t k) = 0;
-};
+  };
+
+  //==============
+  // Request
+  // Handle to a inference request, which will be used to get request results
+  // if the request is sent by asynchronous functions.
+  //
+  // Depend on the protocol, Request class will have different implementations.
+  // But all implementations should contain data required until the request is
+  // completed and the placeholder for requested results.
+  // The InferContext is responsible for initializing the Request, sending it,
+  // monitoring the request transfer and retrieving results from corresponding
+  // request on demand.
+  class Request {
+  public:
+    virtual ~Request() = default;
+
+    // @return the unique identifier of the request.
+    virtual uint64_t Id() const = 0;
+  };
 
   //==============
   // Stat
@@ -446,7 +472,43 @@ public:
        cumulative_send_time_ns(0), cumulative_receive_time_ns(0) {}
   };
 
+  //==============
+  // RequestTimers
+  // Timer to record the time for different request stages
+  class RequestTimers {
+  public:
+    enum Kind {
+      REQUEST_START,
+      REQUEST_END,
+      SEND_START,
+      SEND_END,
+      RECEIVE_START,
+      RECEIVE_END
+    };
+
+    RequestTimers();
+
+    // Reset the timer values to 0. Should always be called before re-using
+    // the timer
+    Error Reset();
+
+    // Record the current timestamp for the request stage specified by 'kind'
+    Error Record(Kind kind);
+  private:
+    friend class InferContext;
+    friend class InferHttpContext;
+    friend class InferGrpcContext;
+    struct timespec request_start_;
+    struct timespec request_end_;
+    struct timespec send_start_;
+    struct timespec send_end_;
+    struct timespec receive_start_;
+    struct timespec receive_end_;
+  };
+
 public:
+  virtual ~InferContext() = default;
+
   // @return the model name being used for inference.
   const std::string& ModelName() const { return model_name_; }
 
@@ -487,6 +549,11 @@ public:
   // @return Error object indicating success or failure
   Error SetRunOptions(const Options& options);
 
+  // Get the current statistic of the InferContext. 
+  // @parm stat - returns Stat objects holding InferContext statistic.
+  // @return Error object indicating success or failure
+  Error GetStat(Stat* stat);
+
   // Send a request to the inference server to perform an inference to
   // produce a result for the outputs specified in the most recent
   // call to SetRunOptions(). The Result objects holding the output
@@ -496,66 +563,64 @@ public:
   // @return Error object indicating success or failure
   virtual Error Run(std::vector<std::unique_ptr<Result>>* results) = 0;
 
-  // Get the current statistic of the InferContext. For gRPC protocol, only
-  // the completed request count and cumulative process time is being measured.
-  // @parm stat - returns Stat objects holding InferContext statistic.
+  // Send an asynchronous request to the inference server to perform
+  // an inference to produce a result for the outputs specified in the most
+  // recent call to SetRunOptions().
+  // @param async_request - returns Request objects as handle to retrieve
+  // inference results.
   // @return Error object indicating success or failure
-  Error GetStat(Stat* stat);
+  virtual Error AsyncRun(
+    std::shared_ptr<Request>* async_request) = 0;
+
+  // Get the result of the asynchronous request referenced by 'async_request'.
+  // The Result objects holding the output values are returned in the same order
+  // as the outputs are specified in the options when AsyncRun() was called.
+  // @param results - returns Result objects holding inference results.
+  // @param async_request - Request objects as handle to retrieve results.
+  // @param wait - if true, block until the request completes. Otherwise, return
+  // immediately.
+  // @return Error object indicating success or failure. Success will be
+  // returned only if the request has been completed succesfully. UNAVAILABLE
+  // will be returned if 'wait' is false and the request is not ready.
+  virtual Error GetAsyncRunResults(
+    std::vector<std::unique_ptr<Result>>* results,
+    const std::shared_ptr<Request>& async_request, bool wait) = 0;
+
+  // Get any one completed asynchronous request.
+  // The Request object will contain the request that is completed
+  // and waiting to give the result.
+  // @param request - returns Request objects holding completed request.
+  // @param wait - if true, block until one request completes. Otherwise, return
+  // immediately.
+  // @return Error object indicating success or failure. Success will be
+  // returned only if the request has been completed succesfully. UNAVAILABLE
+  // will be returned if 'wait' is false and no request is ready.
+  Error GetReadyAsyncRequest(
+    std::shared_ptr<Request>* async_request, bool wait);
 
 protected:
-  //==============
-  // RequestTimers
-  // Timer to record the time for different request stages
-  class RequestTimers {
-  public:
-    enum Kind {
-      REQUEST_START,
-      REQUEST_END,
-      SEND_START,
-      SEND_END,
-      RECEIVE_START,
-      RECEIVE_END
-    };
-
-    RequestTimers();
-
-    // Reset the timer values to 0. Should always be called before re-using
-    // the timer
-    Error Reset();
-
-    // Record the current timestamp for the request stage specified by 'kind'
-    Error Record(Kind kind);
-  private:
-    friend class InferContext;
-    struct timespec request_start_;
-    struct timespec request_end_;
-    struct timespec send_start_;
-    struct timespec send_end_;
-    struct timespec receive_start_;
-    struct timespec receive_end_;
-  };
-
   InferContext(const std::string&, int, bool);
 
-  // Helper function called before inference to reset position indicators
-  // and prepare placeholders for inference result
-  Error PreRunProcessing();
+  // Function for worker thread to proceed the data transfer for all requests
+  virtual void AsyncTransfer() = 0;
 
-  // Helper function called after inference to initialize non-RAW results in
-  // 'requested_results_'.
-  Error PostRunProcessing(InferResponseHeader& infer_response);
+  // Helper function called before inference to prepare 'request'
+  virtual Error PreRunProcessing(std::shared_ptr<Request>& request) = 0;
 
-  // Copy into 'buf' up to 'size' bytes of input data. Return the
-  // actual amount copied in 'input_bytes'.
-  Error GetNextInput(uint8_t* buf, size_t size, size_t* input_bytes);
-
-  // Copy into the context 'size' bytes of result data from
-  // 'buf'. Return the actual amount copied in 'result_<bytes'.
-  Error SetNextRawResult(
-    const uint8_t* buf, size_t size, size_t* result_bytes);
+  // Helper function called by GetAsyncRunResults() to check if the request
+  // is ready. If the request is valid and wait == true,
+  // the function will block until request is ready.
+  Error IsRequestReady(
+    const std::shared_ptr<Request>& async_request, bool wait);
 
   // Update the context stat with the given timer
   Error UpdateStat(const RequestTimers& timer);
+
+  using AsyncReqMap = std::map<uintptr_t, std::shared_ptr<Request>>;
+
+  // map to record ongoing asynchronous requests with pointer to easy handle
+  // as key
+  AsyncReqMap ongoing_async_requests_;
 
   // Model name
   const std::string model_name_;
@@ -569,46 +634,44 @@ protected:
   // Maximum batch size supported by this context.
   uint64_t max_batch_size_;
 
-  // The inputs and outputs
-  std::vector<std::shared_ptr<Input>> inputs_;
-  std::vector<std::shared_ptr<Output>> outputs_;
-
   // Total size of all inputs, in bytes (must be 64-bit integer
   // because used with curl_easy_setopt).
   uint64_t total_input_byte_size_;
 
-  // InferRequestHeader protobuf describing the request
-  InferRequestHeader infer_request_;
-
-  // RequestStatus received in server response
-  RequestStatus request_status_;
-
-  // Buffer that accumulates the serialized InferResponseHeader at the
-  // end of the body.
-  std::string infer_response_buffer_;
-
   // Requested batch size for inference request
   uint64_t batch_size_;
+
+  // Use to assign unique identifier for each asynchronous request
+  uint64_t async_request_id_;
+
+  // The inputs and outputs
+  std::vector<std::shared_ptr<Input>> inputs_;
+  std::vector<std::shared_ptr<Output>> outputs_;
+
+  // Settings generated by current option
+  // InferRequestHeader protobuf describing the request
+  InferRequestHeader infer_request_;
 
   // Outputs requested for inference request
   std::vector<std::shared_ptr<Output>> requested_outputs_;
 
-  // Results being collected for the requested outputs from inference
-  // server response.
-  std::vector<std::unique_ptr<Result>> requested_results_;
-
-  // Current positions within input and output vectors when sending
-  // request and receiving response.
-  size_t input_pos_idx_;
-  size_t result_pos_idx_;
+  //Standalone request context used for synchronous request
+  std::shared_ptr<Request> sync_request_;
 
   // The statistic of the current context
   Stat context_stat_;
 
-  // The timer for infer request
-  // When asynchronous request is implemented where there will be RequestContext
-  // object for each request, move RequestTimers into RequestContext.
-  RequestTimers request_timer_;
+  // worker thread that will perform the asynchronous transfer
+  std::thread worker_;
+
+  // Avoid race condition between main thread and worker thread
+  std::mutex mutex_;
+
+  // Condition variable used for waiting on asynchronous request
+  std::condition_variable cv_;
+
+  // signal for worker thread to stop
+  bool exiting_;
 };
 
 //==============================================================================
@@ -748,7 +811,7 @@ private:
 //
 class InferHttpContext : public InferContext {
 public:
-    ~InferHttpContext();
+  ~InferHttpContext() override;
 
   // Create context that performs inference for a model using HTTP protocol.
   // @param ctx - returns the new InferHttpContext object
@@ -765,14 +828,17 @@ public:
     const std::string& model_name, int model_version = -1,
     bool verbose = false);
 
-  // Send a request to the inference server to perform an inference to
-  // produce a result for the outputs specified in the most recent
-  // call to SetRunOptions(). The Result objects holding the output
-  // values are returned in the same order as the outputs are
-  // specified in the options.
-  // @param results - returns Result objects holding inference results.
-  // @return Error object indicating success or failure
+  // @see InferContext.Run()
   Error Run(std::vector<std::unique_ptr<Result>>* results) override;
+
+  // @see InferContext.AsyncRun()
+  Error AsyncRun(
+    std::shared_ptr<Request>* async_request) override;
+
+  // @see InferContext.GetAsyncRunResults()
+  Error GetAsyncRunResults(
+    std::vector<std::unique_ptr<Result>>* results,
+    const std::shared_ptr<Request>& async_request, bool wait) override;
 
 private:
   static size_t RequestProvider(void*, size_t, size_t, void*);
@@ -781,6 +847,15 @@ private:
 
   InferHttpContext(
     const std::string&, const std::string&, int, bool);
+
+  // @see InferContext.AsyncTransfer()
+  void AsyncTransfer() override;
+
+  // @see InferContext.PreRunProcessing()
+  Error PreRunProcessing(std::shared_ptr<Request>& request) override;
+
+  // curl multi handle for processing asynchronous requests
+  CURLM* multi_handle_;
 
   // URL to POST to
   std::string url_;
@@ -915,6 +990,8 @@ private:
 //
 class InferGrpcContext : public InferContext {
 public:
+  ~InferGrpcContext() override;
+
   // Create context that performs inference for a model using gRPC protocol.
   // @param ctx - returns the new InferContext object
   // @param server_url - inference server name and port
@@ -930,21 +1007,42 @@ public:
     const std::string& model_name, int model_version = -1,
     bool verbose = false);
 
-  // Send a request to the inference server to perform an inference to
-  // produce a result for the outputs specified in the most recent
-  // call to SetRunOptions(). The Result objects holding the output
-  // values are returned in the same order as the outputs are
-  // specified in the options.
-  // @param results - returns Result objects holding inference results.
-  // @return Error object indicating success or failure
+  // @see InferContext.Run()
   Error Run(std::vector<std::unique_ptr<Result>>* results) override;
+
+  // @see InferContext.AsyncRun()
+  Error AsyncRun(
+    std::shared_ptr<Request>* async_request) override;
+
+  // @see InferContext.GetAsyncRunResults()
+  Error GetAsyncRunResults(
+    std::vector<std::unique_ptr<Result>>* results,
+    const std::shared_ptr<Request>& async_request, bool wait) override;
 
 private:
   InferGrpcContext(
     const std::string&, const std::string&, int, bool);
 
+  // @see InferContext.AsyncTransfer()
+  void AsyncTransfer() override;
+
+  // @see InferContext.PreRunProcessing()
+  Error PreRunProcessing(std::shared_ptr<Request>& request) override;
+
+  // additional vector contains 1-indexed key to available slots
+  // in async request map.
+  std::vector<uintptr_t> reusable_slot_;
+
+  // The producer-consumer queue used to communicate asynchronously with
+  // the gRPC runtime.
+  grpc::CompletionQueue async_request_completion_queue_;
+
   // gRPC end point.
-  std::unique_ptr<GRPCService::Stub> stub_;
+  std::unique_ptr<GRPCService::Stub> stub_; 
+
+  // request for gRPC call, one request object can be used for multiple calls
+  // since it can be overwritten as soon as the gRPC send finishes.
+  InferRequest request_;
 };
 
 //==============================================================================
