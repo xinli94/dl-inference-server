@@ -24,7 +24,7 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-## Makefile for Inference Server Clients
+## Makefile for TensorRT Inference Server Clients
 
 BUILDDIR    ?= build
 CFLAGS      ?= -std=c++11 -fPIC -Wall -Werror -O2
@@ -106,14 +106,14 @@ all: $(BUILDDIR)/src/clients/python/libcrequest.so \
 # below does this fix.
 pip: $(PY_SRCS) $(GRPC_PY) $(PROTO_PY) $(BUILDDIR)/src/clients/python/libcrequest.so
 	$(RM) -fr $(BDISTDIR)
-	mkdir -p $(BDISTDIR)/inference_server/api
-	cp $^ $(BDISTDIR)/inference_server/api/.
-	sed -i "s/^import \([^ ]*\)_pb2 as \([^ ]*\)$$/from inference_server.api import \1_pb2 as \2/" \
-    $(BDISTDIR)/inference_server/api/*_pb2.py
-	sed -i "s/^import \([^ ]*\)_pb2 as \([^ ]*\)$$/from inference_server.api import \1_pb2 as \2/" \
-    $(BDISTDIR)/inference_server/api/*_pb2_grpc.py
+	mkdir -p $(BDISTDIR)/tensorrtserver/api
+	cp $^ $(BDISTDIR)/tensorrtserver/api/.
+	sed -i "s/^import \([^ ]*\)_pb2 as \([^ ]*\)$$/from tensorrtserver.api import \1_pb2 as \2/" \
+    $(BDISTDIR)/tensorrtserver/api/*_pb2.py
+	sed -i "s/^import \([^ ]*\)_pb2 as \([^ ]*\)$$/from tensorrtserver.api import \1_pb2 as \2/" \
+    $(BDISTDIR)/tensorrtserver/api/*_pb2_grpc.py
 	cp $(PY_SETUP) $(BDISTDIR)/.
-	touch $(BDISTDIR)/inference_server/__init__.py
+	touch $(BDISTDIR)/tensorrtserver/__init__.py
 	(cd $(BDISTDIR) && python$(PYVER) setup.py bdist_wheel)
 
 # Use real file such that gRPC won't get build from source every time
@@ -177,7 +177,7 @@ clean:
 
 # Show help.
 help:
-	@echo 'Inference Server Client Makefile'
+	@echo 'TensorRT Inference Server Client Makefile'
 	@echo
 	@echo 'Usage: make [TARGET]'
 	@echo 'TARGETS:'

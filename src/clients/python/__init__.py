@@ -31,8 +31,8 @@ from ctypes import *
 import numpy as np
 from numpy.ctypeslib import ndpointer
 import pkg_resources
-import inference_server.api.model_config_pb2
-from inference_server.api.server_status_pb2 import ServerStatus
+import tensorrtserver.api.model_config_pb2
+from tensorrtserver.api.server_status_pb2 import ServerStatus
 
 class ProtocolType(IntEnum):
     HTTP = 0
@@ -58,7 +58,7 @@ class _utf8(object):
         else:
             return value.encode('utf8')
 
-_crequest_path = pkg_resources.resource_filename('inference_server.api', 'libcrequest.so')
+_crequest_path = pkg_resources.resource_filename('tensorrtserver.api', 'libcrequest.so')
 _crequest = cdll.LoadLibrary(_crequest_path)
 
 _crequest_error_new = _crequest.ErrorNew
@@ -722,7 +722,7 @@ class InferContext:
             if isunavailable:
                 _crequest_error_del(err)
                 return None
-        
+
         self._last_request_id = _raise_if_error(err)
 
         requested_outputs = self._requested_outputs_dict[request_id]

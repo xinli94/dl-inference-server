@@ -46,14 +46,14 @@ except ImportError:
     bdist_wheel = None
 
 setup(
-    name='inference_server',
+    name='tensorrtserver',
     version=VERSION,
     author='NVIDIA Inc.',
     author_email='davidg@nvidia.com',
-    description='Python client library for inference server',
+    description='Python client library for TensorRT Inference Server',
     license='BSD',
     url='http://nvidia.com',
-    keywords='inference server service client',
+    keywords='tensorrt inference server service client',
     packages=find_packages(),
     install_requires=REQUIRED,
     package_data={

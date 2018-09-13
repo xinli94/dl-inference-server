@@ -31,8 +31,8 @@ import numpy as np
 import os
 from builtins import range
 from PIL import Image
-from inference_server.api import *
-import inference_server.api.model_config_pb2 as model_config
+from tensorrtserver.api import *
+import tensorrtserver.api.model_config_pb2 as model_config
 
 FLAGS = None
 
@@ -243,7 +243,7 @@ if __name__ == '__main__':
     parser.add_argument('-u', '--url', type=str, required=False, default='localhost:8000',
                         help='Inference server URL. Default is localhost:8000.')
     parser.add_argument('-i', '--protocol', type=str, required=False, default='HTTP',
-                        help='Protocol (HTTP/gRPC) used to ' + 
+                        help='Protocol (HTTP/gRPC) used to ' +
                         'communicate with inference service. Default is HTTP.')
     parser.add_argument('-p', '--preprocessed', type=str, required=False,
                         metavar='FILE', help='Write preprocessed image to specified file.')

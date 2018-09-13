@@ -1,9 +1,10 @@
-# NVIDIA Inference Server Clients
+# NVIDIA TensorRT Inference Server Clients
 
-The NVIDIA Inference Server provides a cloud inferencing solution
-optimized for NVIDIA GPUs. The inference server provides deep-learning
-inferencing via HTTP and gRPC endpoints, allowing remote clients to
-request inferencing for any model being managed by the server.
+The NVIDIA TensorRT Inference Server provides a cloud inferencing
+solution optimized for NVIDIA GPUs. The inference server provides
+deep-learning inferencing via HTTP and gRPC endpoints, allowing remote
+clients to request inferencing for any model being managed by the
+server.
 
 This repo contains C++ and Python client libraries that make it easy
 to communicate with the inference server. Also included are a couple
@@ -40,10 +41,10 @@ is also available for inference server issues and questions.
 ## Branches
 
 **master**: Active development branch. Typically will contain
- development corresponding to the next upcoming Inference Server
- container release.
+ development corresponding to the next upcoming TensorRT Inference
+ Server container release.
 
-**yy.mm**: Branch compatible with Inference Server yy.mm, for
+**yy.mm**: Branch compatible with TensorRT Inference Server yy.mm, for
   example *18.09*.
 
 ## Building the Clients
@@ -71,7 +72,7 @@ and example image\_client and perf\_client applications can be built:
 Build artifacts are in build/.  The Python whl file is generated in
 build/dist/dist/ and can be installed with a command like the following:
 
-    pip install --no-cache-dir --upgrade build/dist/dist/inference_server-0.5.0-cp27-cp27mu-linux_x86_64.whl
+    pip install --no-cache-dir --upgrade build/dist/dist/tensorrtserver-0.6.0-cp27-cp27mu-linux_x86_64.whl
 
 ## Building the Clients with Docker
 
@@ -92,7 +93,7 @@ copy the images.
     $ docker run --rm -it -v /tmp:/tmp/host inference_server_clients
     # cp build/image_client /tmp/host/.
     # cp build/perf_client /tmp/host/.
-    # cp build/dist/dist/inference_server-*.whl /tmp/host/.
+    # cp build/dist/dist/tensorrtserver-*.whl /tmp/host/.
 
 You can now access image\_client, perf\_client and the wheel file from /tmp on the
 host system.
@@ -124,10 +125,10 @@ Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html)
 launch the inference server container pointing to that model
 store. For example:
 
-    $ nvidia-docker run --rm -p8000:8000 -p8001:8001 -v/path/to/dl-inference-server/examples/models:/models nvcr.io/nvidia/inferenceserver:18.09-py3 inference_server --model-store=/models
+    $ nvidia-docker run --rm -p8000:8000 -p8001:8001 -v/path/to/dl-inference-server/examples/models:/models nvcr.io/nvidia/tensorrtserver:18.09-py3 trtserver --model-store=/models
 
 Make sure you choose the most recent version of
-nvcr.io/nvidia/inferenceserver. Port 8000 exposes the inference server
+nvcr.io/nvidia/tensorrtserver. Port 8000 exposes the inference server
 HTTP endpoint and port 8001 exposes the gRPC endpoint. Replace
 /path/to/dl-inference-server/examples/models with the corresponding
 path in your local clone of this repo. Once the server is running you
@@ -205,10 +206,10 @@ Guide](https://docs.nvidia.com/deeplearning/sdk/inference-user-guide/index.html)
 launch the inference server container pointing to that model
 store. For example:
 
-    $ nvidia-docker run --rm -p8000:8000 -p8001:8001 -v/path/to/dl-inference-server/examples/models:/models nvcr.io/nvidia/inferenceserver:18.09-py3 inference_server --model-store=/models
+    $ nvidia-docker run --rm -p8000:8000 -p8001:8001 -v/path/to/dl-inference-server/examples/models:/models nvcr.io/nvidia/tensorrtserver:18.09-py3 trtserver --model-store=/models
 
 Make sure you choose the most recent version of
-nvcr.io/nvidia/inferenceserver. Port 8000 exposes the inference server
+nvcr.io/nvidia/tensorrtserver. Port 8000 exposes the inference server
 HTTP endpoint and port 8001 exposes the gRPC endpoint. Replace
 /path/to/dl-inference-server/examples/models with the corresponding
 path in your local clone of this repo.
@@ -379,7 +380,7 @@ The following shows an example of the basic steps required for
 inferencing (error checking not included to improve clarity):
 
 ```python
-from inference_server.api import *
+from tensorrtserver.api import *
 
 # Create input with random data
 input_list = list()

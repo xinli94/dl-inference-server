@@ -35,17 +35,17 @@ from PIL import Image
 import grpc
 # Drop "from src.core import" because the import hierarchy in proto files
 # will be removed in Makefile.clients
-from inference_server.api import api_pb2
-from inference_server.api import grpc_service_pb2
-from inference_server.api import grpc_service_pb2_grpc
-from inference_server.api import model_config_pb2
-from inference_server.api import request_status_pb2
-from inference_server.api import server_status_pb2
+from tensorrtserver.api import api_pb2
+from tensorrtserver.api import grpc_service_pb2
+from tensorrtserver.api import grpc_service_pb2_grpc
+from tensorrtserver.api import model_config_pb2
+from tensorrtserver.api import request_status_pb2
+from tensorrtserver.api import server_status_pb2
 
 FLAGS = None
 
 def model_dtype_to_np(model_dtype):
-    
+
     if model_dtype == model_config_pb2.TYPE_BOOL:
         return np.bool
     elif model_dtype == model_config_pb2.TYPE_INT8:
