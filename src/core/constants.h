@@ -49,6 +49,10 @@ constexpr char kTensorFlowSavedModelFilename[] = "model.savedmodel";
 constexpr char kCaffe2NetDefFilename[] = "model.netdef";
 constexpr char kCaffe2NetDefInitFilenamePrefix[] = "init_";
 
+constexpr char kMetricsLabelModelName[] = "model";
+constexpr char kMetricsLabelModelVersion[] = "version";
+constexpr char kMetricsLabelGpuUuid[] = "gpu_uuid";
+
 constexpr uint64_t NANOS_PER_SECOND = 1000000000;
 constexpr int MAX_GRPC_MESSAGE_SIZE = 100 * 1024 * 1024;
 

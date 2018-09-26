@@ -83,14 +83,14 @@ namespace nic = nvidia::inferenceserver::client;
 //     - Cumulative time: the total time between request received and
 //         response sent on the requests sent by perf client.
 //     - Average Cumulative time: cumulative time / number of inference requests
-//     - Run time: the total time it takes to run inferencing including time
+//     - Compute time: the total time it takes to run inferencing including time
 //         copying input tensors to GPU memory, time executing the model,
 //         and time copying output tensors from GPU memory for the requests
 //         sent by perf client.
-//     - Average run time: run time / number of inference requests
-//     - Wait time: the total time it takes to wait for an available model
+//     - Average compute time: compute time / number of inference requests
+//     - Queue time: the total time it takes to wait for an available model
 //         instance for the requests sent by perf client.
-//     - Average wait time: wait time / number of inference requests
+//     - Average queue time: queue time / number of inference requests
 //
 // - Dynamic concurrent request mode:
 //     In this setting, the client will perform the following procedure:
@@ -135,8 +135,8 @@ typedef struct PerformanceStatusStruct {
   // Request count and elapsed time measured by server
   uint64_t server_request_count;
   uint64_t server_cumm_time_ns;
-  uint64_t server_run_wait_time_ns;
-  uint64_t server_run_time_ns;
+  uint64_t server_queue_time_ns;
+  uint64_t server_compute_time_ns;
 
   // Request count and elapsed time measured by client
   uint64_t client_request_count;
@@ -648,8 +648,8 @@ private:
       } else {
         uint64_t start_cnt = 0;
         uint64_t start_cumm_time_ns = 0;
-        uint64_t start_run_wait_time_ns = 0;
-        uint64_t start_run_time_ns = 0;
+        uint64_t start_queue_time_ns = 0;
+        uint64_t start_compute_time_ns = 0;
 
         const auto& vstart_itr =
           start_status.version_status().find(status_model_version);
@@ -659,9 +659,8 @@ private:
           if (start_itr != vstart_itr->second.infer_stats().end()) {
             start_cnt = start_itr->second.success().count();
             start_cumm_time_ns = start_itr->second.success().total_time_ns();
-            start_run_wait_time_ns =
-              start_itr->second.run_wait().total_time_ns();
-            start_run_time_ns = start_itr->second.run().total_time_ns();
+            start_queue_time_ns = start_itr->second.queue().total_time_ns();
+            start_compute_time_ns = start_itr->second.compute().total_time_ns();
           }
         }
 
@@ -669,11 +668,10 @@ private:
           end_itr->second.success().count() - start_cnt;
         summary.server_cumm_time_ns =
           end_itr->second.success().total_time_ns() - start_cumm_time_ns;
-        summary.server_run_wait_time_ns =
-          end_itr->second.run_wait().total_time_ns() - start_run_wait_time_ns;
-        summary.server_run_time_ns =
-          end_itr->second.run().total_time_ns() - start_run_time_ns -
-          summary.server_run_wait_time_ns;
+        summary.server_queue_time_ns =
+          end_itr->second.queue().total_time_ns() - start_queue_time_ns;
+        summary.server_compute_time_ns =
+          end_itr->second.compute().total_time_ns() - start_compute_time_ns;
       }
     }
     return err;
@@ -1063,11 +1061,11 @@ Report(
   const uint64_t cumm_time_us = summary.server_cumm_time_ns / 1000;
   const uint64_t cumm_avg_us = cumm_time_us / cnt;
 
-  const uint64_t run_wait_time_us = summary.server_run_wait_time_ns / 1000;
-  const uint64_t run_wait_avg_us = run_wait_time_us / cnt;
+  const uint64_t queue_time_us = summary.server_queue_time_ns / 1000;
+  const uint64_t queue_avg_us = queue_time_us / cnt;
 
-  const uint64_t run_time_us = summary.server_run_time_ns / 1000;
-  const uint64_t run_avg_us = run_time_us / cnt;
+  const uint64_t compute_time_us = summary.server_compute_time_ns / 1000;
+  const uint64_t compute_avg_us = compute_time_us / cnt;
 
   const uint64_t avg_latency_us = summary.client_avg_latency_ns / 1000;
   const uint64_t std_us = summary.std_us;
@@ -1125,9 +1123,9 @@ Report(
     << "  Server: " << std::endl
     << "    Request count: " << cnt << std::endl
     << "    Avg request latency: " << cumm_avg_us << " usec"
-    << " (overhead " << (cumm_avg_us - run_avg_us - run_wait_avg_us) << " usec + "
-    << "wait " << run_wait_avg_us << " usec + "
-    << "compute " << run_avg_us << " usec)" << std::endl
+    << " (overhead " << (cumm_avg_us - queue_avg_us - compute_avg_us) << " usec + "
+    << "queue " << queue_avg_us << " usec + "
+    << "compute " << compute_avg_us << " usec)" << std::endl
     << std::endl;
 
   return nic::Error(ni::RequestStatusCode::SUCCESS);
@@ -1369,7 +1367,7 @@ main(int argc, char** argv)
     if (!filename.empty()) {
       ofs
         << "Concurrency,Inferences/Second,Client Send,"
-        << "Network+Server Send/Recv,Server Wait,"
+        << "Network+Server Send/Recv,Server Queue,"
         << "Server Compute,Client Recv"
         << std::endl;
     }
@@ -1390,12 +1388,12 @@ main(int argc, char** argv)
             });
 
       for (PerfStatus& status : summary) {
-        uint64_t avg_run_wait_ns =
-          status.server_run_wait_time_ns / status.server_request_count;
-        uint64_t avg_run_ns =
-          status.server_run_time_ns / status.server_request_count;
+        uint64_t avg_queue_ns =
+          status.server_queue_time_ns / status.server_request_count;
+        uint64_t avg_compute_ns =
+          status.server_compute_time_ns / status.server_request_count;
         uint64_t avg_network_misc_ns =
-          status.client_avg_latency_ns - avg_run_wait_ns - avg_run_ns -
+          status.client_avg_latency_ns - avg_queue_ns - avg_compute_ns -
           status.client_avg_send_time_ns - status.client_avg_receive_time_ns;
 
         ofs
@@ -1403,8 +1401,8 @@ main(int argc, char** argv)
           << status.client_infer_per_sec << ","
           << (status.client_avg_send_time_ns / 1000) << ","
           << (avg_network_misc_ns / 1000) << ","
-          << (avg_run_wait_ns / 1000) << ","
-          << (avg_run_ns / 1000) << ","
+          << (avg_queue_ns / 1000) << ","
+          << (avg_compute_ns / 1000) << ","
           << (status.client_avg_receive_time_ns / 1000) << std::endl;
       }
     }

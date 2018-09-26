@@ -401,7 +401,9 @@ InferContextInputNew(
   InferContextInputCtx* lctx = new InferContextInputCtx;
   nic::Error err =
     infer_ctx->ctx->GetInput(std::string(input_name), &lctx->input);
-  lctx->input->Reset();
+  if (err.IsOk()) {
+    lctx->input->Reset();
+  }
   *ctx = lctx;
   return new nic::Error(err);
 }

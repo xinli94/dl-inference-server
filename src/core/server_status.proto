@@ -70,16 +70,15 @@ message InferRequestStats {
   // including HTTP or gRPC endpoint termination time.
   StatDuration failed = 2;
 
-  // Time required to run inferencing including time waiting for an
-  // available model instance, time copying input tensors to GPU
-  // memory, time executing the model, and time copying output tensors
-  // from GPU memory. Wait time is also captured separately 'run_wait'
-  // so to get inferencing time not including wait time use 'run' -
-  // 'run_wait'.
-  StatDuration run = 3;
+  // Time required to run inferencing for an inference request;
+  // including time copying input tensors to GPU memory, time
+  // executing the model, and time copying output tensors from GPU
+  // memory.
+  StatDuration compute = 3;
 
-  // Time waiting for an available model instance.
-  StatDuration run_wait = 4;
+  // Time an inference request waits in scheduling queue for an
+  // available model instance.
+  StatDuration queue = 4;
 }
 
 // Server readiness states.
@@ -99,6 +98,17 @@ message ModelVersionStatus {
   // Duration statistics for each batch size used for this version of
   // the model.
   map<uint32, InferRequestStats> infer_stats = 2;
+
+  // Cummulative number of model executions performed for the
+  // model/version. A single model execution performs inferencing for
+  // the entire request batch and can perform inferencing for multiple
+  // requests if dynamic batching is enabled.
+  uint64 model_execution_count = 3;
+
+  // Cummulative number of model inferences performed for the
+  // model/version. Each inference in a batched request is counted as
+  // an individual inference.
+  uint64 model_inference_count = 4;
 }
 
 // Status for a model.

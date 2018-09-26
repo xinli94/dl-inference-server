@@ -58,7 +58,7 @@ message ModelInstanceGroup {
   enum Kind {
     // This instance group represents instances that can run on either
     // CPU or GPU. If all GPUs listed in 'gpus' are available then
-    // instances will be create on GPU(s), otherwise instances will be
+    // instances will be created on GPU(s), otherwise instances will be
     // created on CPU.
     KIND_AUTO = 0;
 
@@ -84,14 +84,15 @@ message ModelInstanceGroup {
   // cannot be specified.
   Kind kind = 4;
 
-  // Number of instances in this group created for each GPU listed in
-  // 'gpus'. Default is 1.
+  // For a group assigned to GPU, the number of instances created for
+  // each GPU listed in 'gpus'. For a group assigned to CPU the number
+  // of instances created. Default is 1.
   int32 count = 2;
 
   // GPU(s) where instances should be available. For each GPU listed,
   // 'count' instances of the model will be available. Setting 'gpus'
   // to empty (or not specifying at all) is eqivalent to listing all
-  // system GPUs.
+  // available GPUs.
   repeated int32 gpus = 3;
 }
 
@@ -156,6 +157,20 @@ message ModelVersionPolicy {
   }
 }
 
+// Dynamic batching configuration
+message ModelDynamicBatching {
+  // Preferred batch sizes for dynamic batching. If a batch of one of
+  // these sizes can be formed it will be executed immediately.  If
+  // not specified a preferred batch size will be chosen automatically
+  // based on model and GPU characteristics.
+  repeated int32 preferred_batch_size = 1;
+
+  // The maximum time, in microseconds, a request will be delayed in
+  // the scheduling queue to wait for additional requests for
+  // batching. Default is 0.
+  int32 max_queue_delay_microseconds = 2;
+}
+
 // Model configuration.
 message ModelConfig {
   // Name of the model.
@@ -173,6 +188,10 @@ message ModelConfig {
   // has implications on the expected dimension of the inputs, see
   // Format above).
   int32 max_batch_size = 4;
+
+  // Dynamic batching configuration for the model. If not specified
+  // then dynamic batching is disabled for the model.
+  ModelDynamicBatching dynamic_batching = 11;
 
   // Inputs and outputs to the model.
   repeated ModelInput input = 5;
@@ -192,7 +211,11 @@ message ModelConfig {
   // the model that supports that compute capability. The filename
   // refers to a file within the model version directory.
   map<string, string> cc_model_filenames = 9;
- }
+
+  // Optional model tags. User-specific key-value pairs for this
+  // model. These tags are applied
+  map<string, string> tags = 10;
+}
 
 // List of model configurations.
 message ModelConfigList {
