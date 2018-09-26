@@ -30,6 +30,6 @@ set -ex
 # Caffe2 resnet50
 mkdir -p models/resnet50_netdef/1
 wget -O models/resnet50_netdef/1/model.netdef \
-     https://github.com/caffe2/models/raw/master/resnet50/predict_net.pb
+     http://download.caffe2.ai.s3.amazonaws.com/models/resnet50/predict_net.pb
 wget -O models/resnet50_netdef/1/init_model.netdef \
-     https://github.com/caffe2/models/raw/master/resnet50/init_net.pb
+     http://download.caffe2.ai.s3.amazonaws.com/models/resnet50/init_net.pb
