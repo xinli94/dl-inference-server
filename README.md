@@ -51,7 +51,12 @@ is also available for inference server issues and questions.
 
 Before building the client libraries and applications you must first
 install some prerequisites. The following instructions assume Ubuntu
-16.04. OpenCV is used by image\_client to preprocess images before
+16.04; other distributions will likely require additional/different
+dependencies and Makefile modifications. For example Mint requires
+that "-lssl -lcrypto" be added to IMAGE\_LDFLAGS and PERF\_LDFLAGS in
+Makefile.clients.
+
+OpenCV is used by image\_client to preprocess images before
 sending them to the inference server for inferencing. The python-pil
 package is required by the Python image\_client example.
 
