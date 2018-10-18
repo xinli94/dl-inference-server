@@ -245,7 +245,7 @@ if __name__ == '__main__':
                         help='Enable verbose output')
     parser.add_argument('-m', '--model-name', type=str, required=True,
                         help='Name of model')
-    parser.add_argument('-x', '--model-version', type=str, required=False,
+    parser.add_argument('-x', '--model-version', type=int, required=False,
                         help='Version of model. Default is to use latest version.')
     parser.add_argument('-b', '--batch-size', type=int, required=False, default=1,
                         help='Batch size. Default is 1.')
@@ -279,9 +279,8 @@ if __name__ == '__main__':
     # The meta data part can be reused across requests
     request = grpc_service_pb2.InferRequest()
     request.model_name = FLAGS.model_name
-    if FLAGS.model_version is None:
-        FLAGS.model_version = "" # using lastest version
-    request.version = FLAGS.model_version
+    if FLAGS.model_version is not None:
+        request.version = FLAGS.model_version
     request.meta_data.batch_size = FLAGS.batch_size
     output_message = api_pb2.InferRequestHeader.Output()
     output_message.name = output_name

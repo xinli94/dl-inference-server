@@ -231,7 +231,7 @@ if __name__ == '__main__':
                         help='Enable verbose output')
     parser.add_argument('-m', '--model-name', type=str, required=True,
                         help='Name of model')
-    parser.add_argument('-x', '--model-version', type=str, required=False,
+    parser.add_argument('-x', '--model-version', type=int, required=False,
                         help='Version of model. Default is to use latest version.')
     parser.add_argument('-b', '--batch-size', type=int, required=False, default=1,
                         help='Batch size. Default is 1.')
