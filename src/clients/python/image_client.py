@@ -29,10 +29,12 @@
 import argparse
 import numpy as np
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "64"
 from builtins import range
 from PIL import Image
 from tensorrtserver.api import *
 import tensorrtserver.api.model_config_pb2 as model_config
+import tensorflow as tf
 
 FLAGS = None
 
@@ -133,6 +135,35 @@ def parse_model(url, protocol, model_name, batch_size, verbose=False):
         w = input.dims[2]
 
     return (input.name, output.name, c, h, w, input.format, model_dtype_to_np(input.data_type))
+
+def read_tensor_from_image_file(file_name,
+                                input_height=299,
+                                input_width=299,
+                                input_mean=0,
+                                input_std=255):
+    input_name = "file_reader"
+    output_name = "normalized"
+    file_reader = tf.read_file(file_name, input_name)
+    if file_name.endswith(".png"):
+        image_reader = tf.image.decode_png(
+            file_reader, channels=3, name="png_reader")
+    elif file_name.endswith(".gif"):
+        image_reader = tf.squeeze(
+            tf.image.decode_gif(file_reader, name="gif_reader"))
+    elif file_name.endswith(".bmp"):
+        image_reader = tf.image.decode_bmp(file_reader, name="bmp_reader")
+    else:
+        image_reader = tf.image.decode_jpeg(
+            file_reader, channels=3, name="jpeg_reader")
+
+    float_caster = tf.cast(image_reader, tf.float32)
+    dims_expander = tf.expand_dims(float_caster, 0)
+    resized = tf.image.resize_bilinear(dims_expander, [input_height, input_width])
+    normalized = tf.divide(tf.subtract(resized, [input_mean]), [input_std])
+    sess = tf.Session()
+    result = sess.run(normalized)
+
+    return result
 
 def preprocess(img, format, dtype, c, h, w, scaling):
     """
@@ -268,52 +299,59 @@ if __name__ == '__main__':
     if os.path.isdir(FLAGS.image_filename):
         files = [f for f in os.listdir(FLAGS.image_filename)
             if os.path.isfile(os.path.join(FLAGS.image_filename, f))]
-        multiple_inputs = (len(files) > 1)
-
-        input_tensors = []
-        request_ids = []
-        filenames = []
-        # Place every 'batch_size' number of images into one request
-        # and send it via AsyncRun() API. If the last request doesn't have
-        # 'batch_size' input tensors, pad it with the last input tensor.
-        for idx in range(len(files)):
-            filenames.append(files[idx])
-
-            img = Image.open(os.path.join(FLAGS.image_filename, files[idx]))
-            input_tensor = preprocess(img, format, dtype, c, h, w, FLAGS.scaling)
-            input_tensors.append(input_tensor)
-            if (idx + 1 == len(files)):
-                while (len(input_tensors) != FLAGS.batch_size):
-                    input_tensors.append(input_tensor)
-            # Send the request and reset input_tensors
-            if len(input_tensors) >= FLAGS.batch_size:
-                request_ids.append(ctx.async_run(
-                    { input_name : input_tensors },
-                    { output_name : (InferContext.ResultFormat.CLASS, FLAGS.classes) },
-                    FLAGS.batch_size))
-                input_tensors = []
-                batched_filenames.append(filenames)
-                filenames = []
-        # Get results by send order
-        for request_id in request_ids:
-            results.append(ctx.get_async_run_results(request_id, True))
     else:
-        batched_filenames.append([FLAGS.image_filename])
-        # Load and preprocess the image
-        img = Image.open(FLAGS.image_filename)
+        files = [os.path.basename(FLAGS.image_filename)] if os.path.isfile(FLAGS.image_filename) else []
+        FLAGS.image_filename = os.path.split(FLAGS.image_filename)[0]
+
+    multiple_inputs = (len(files) > 1)
+
+    input_tensors = []
+    request_ids = []
+    filenames = []
+    # Place every 'batch_size' number of images into one request
+    # and send it via AsyncRun() API. If the last request doesn't have
+    # 'batch_size' input tensors, pad it with the last input tensor.
+    for idx in range(len(files)):
+        filenames.append(files[idx])
+
+        img = Image.open(os.path.join(FLAGS.image_filename, files[idx]))
         input_tensor = preprocess(img, format, dtype, c, h, w, FLAGS.scaling)
+        # input_tensor = read_tensor_from_image_file(os.path.join(FLAGS.image_filename, files[idx]))
 
-        if FLAGS.preprocessed is not None:
-            with open(preprocessed, "w") as file:
-                file.write(input_tensor.tobytes())
+        input_tensors.append(input_tensor)
+        if (idx + 1 == len(files)):
+            while (len(input_tensors) != FLAGS.batch_size):
+                input_tensors.append(input_tensor)
+        # Send the request and reset input_tensors
+        if len(input_tensors) >= FLAGS.batch_size:
+            request_ids.append(ctx.async_run(
+                { input_name : input_tensors },
+                { output_name : (InferContext.ResultFormat.CLASS, FLAGS.classes) },
+                FLAGS.batch_size))
+            input_tensors = []
+            batched_filenames.append(filenames)
+            filenames = []
+    # Get results by send order
+    for request_id in request_ids:
+        results.append(ctx.get_async_run_results(request_id, True))
 
-        # Need 'batch_size' copies of the input tensor...
-        input_tensors = [input_tensor for b in range(FLAGS.batch_size)]
+    # else:
+    #     batched_filenames.append([FLAGS.image_filename])
+    #     # Load and preprocess the image
+    #     img = Image.open(FLAGS.image_filename)
+    #     input_tensor = preprocess(img, format, dtype, c, h, w, FLAGS.scaling)
 
-        results.append(ctx.run(
-            { input_name : input_tensors },
-            { output_name : (InferContext.ResultFormat.CLASS, FLAGS.classes) },
-            FLAGS.batch_size))
+    #     if FLAGS.preprocessed is not None:
+    #         with open(preprocessed, "w") as file:
+    #             file.write(input_tensor.tobytes())
+
+    #     # Need 'batch_size' copies of the input tensor...
+    #     input_tensors = [input_tensor for b in range(FLAGS.batch_size)]
+
+    #     results.append(ctx.run(
+    #         { input_name : input_tensors },
+    #         { output_name : (InferContext.ResultFormat.CLASS, FLAGS.classes) },
+    #         FLAGS.batch_size))
 
     for idx in range(len(results)):
         postprocess(results[idx], batched_filenames[idx], idx,

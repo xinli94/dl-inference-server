@@ -131,10 +131,12 @@ def parse_model(status, model_name, batch_size, verbose=False):
                         model_config_pb2.ModelInput.Format.Name(model_config_pb2.ModelInput.FORMAT_NHWC))
 
     if input.format == model_config_pb2.ModelInput.FORMAT_NHWC:
+        print '>>>>>> format NHWC'
         h = input.dims[0]
         w = input.dims[1]
         c = input.dims[2]
     else:
+        print '>>>>>> format NCHW'
         c = input.dims[0]
         h = input.dims[1]
         w = input.dims[2]
@@ -175,7 +177,7 @@ def preprocess(img, format, dtype, c, h, w, scaling):
     else:
         scaled = typed
 
-    # Swap to CHW if necessary
+     # Swap to CHW if necessary
     if format == model_config_pb2.ModelInput.FORMAT_NCHW:
         ordered = np.transpose(scaled, (2, 0, 1))
     else:
@@ -185,6 +187,36 @@ def preprocess(img, format, dtype, c, h, w, scaling):
     # doesn't provide any information as to other channel orderings
     # (like BGR) so we just assume RGB.
     return ordered
+
+
+def preprocess_xin(image_name, h, w):
+    import cv2
+    image = cv2.imread(image_name)
+    resized = cv2.resize(image, (5,5))
+    scaled = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+
+    scaled = np.float32(scaled)
+
+    # image = Image.open(image_name)
+    # scaled = np.float32(np.array(image.resize((w, h))))
+    # # for i in range(299):
+    # #     for j in range(299):
+    # #         for k in range(3):
+    # #             if scaled[i][j][k]:
+    # #                 print scaled[i][j][k]
+
+    # Swap to CHW if necessary
+    if format == model_config_pb2.ModelInput.FORMAT_NCHW:
+        print '>>>>>>> swap to NCHW'
+        ordered = np.transpose(scaled, (2, 0, 1))
+    else:
+        print '>>>>>>> swap to NHWC'
+        ordered = scaled
+
+    print '>>>>>>>>>', ordered
+
+    return ordered
+
 
 def postprocess(results, files, idx, batch_size, num_classes, verbose=False):
     """
@@ -240,6 +272,10 @@ def postprocess(results, files, idx, batch_size, num_classes, verbose=False):
 
 
 if __name__ == '__main__':
+
+    import time
+    start_time = time.time()
+
     parser = argparse.ArgumentParser()
     parser.add_argument('-v', '--verbose', action="store_true", required=False, default=False,
                         help='Enable verbose output')
@@ -313,20 +349,28 @@ if __name__ == '__main__':
             if len(request.meta_data.input) == 0:
                 request.meta_data.input.add(
                     name=input_name, byte_size=input_tensor.size * input_tensor.itemsize)
+
             if input_bytes is None:
                 input_bytes = input_tensor.tobytes()
             else:
                 input_bytes += input_tensor.tobytes()
+
+            # print('>>>>>> input_tensor: ', input_tensor[:100])
+            # print('>>>>>> tobytes() input_bytes: ', input_bytes[:100])
+
             cnt += 1
             if (idx + 1 == len(files)):
                 while (cnt != FLAGS.batch_size):
                     input_bytes += input_tensor.tobytes()
                     cnt += 1
+
             # Send the request and reset input_tensors
             if cnt >= FLAGS.batch_size:
                 del request.raw_input[:]
                 request.raw_input.extend([input_bytes])
                 # Call and receive future response from async Infer gRPC
+                # print('>>>>>>>>>> len(request.raw_input)', len(request.raw_input))
+                # print('>>>>>>>>>>>>>>> request', request)
                 requests.append(grpc_stub.Infer.future(request))
                 input_bytes = None
                 cnt = 0
@@ -338,8 +382,13 @@ if __name__ == '__main__':
     else:
         batched_filenames.append([FLAGS.image_filename])
         # Load and preprocess the image
-        img = Image.open(FLAGS.image_filename)
-        input_tensor = preprocess(img, format, dtype, c, h, w, FLAGS.scaling)
+
+
+        # img = Image.open(FLAGS.image_filename)
+        # input_tensor = preprocess(img, format, dtype, c, h, w, FLAGS.scaling)
+
+        input_tensor = preprocess_xin(FLAGS.image_filename, h, w)
+
         request.meta_data.input.add(
             name=input_name, byte_size=input_tensor.size * input_tensor.itemsize)
 
@@ -349,16 +398,25 @@ if __name__ == '__main__':
 
         # Need 'batch_size' copies of the input tensor...
         input_bytes = input_tensor.tobytes()
+        # print('>>>>>> input_tensor: ', input_tensor[:100])
+        # print('>>>>>> tobytes() input_bytes: ', input_bytes[:100])
+
         for b in range(FLAGS.batch_size-1):
             input_bytes += input_tensor.tobytes()
+
         request.raw_input.extend([input_bytes])
+        # print('>>>>>>>>>> len(request.raw_input)', len(request.raw_input))
 
         # Call and receive response from Infer gRPC
         responses.append(grpc_stub.Infer(request))
         print(responses[0].request_status)
+
+        # print('>>>>>>>>>>>>>>> request', request)
 
     # TODO: Update postprocess
     for idx in range(len(responses)):
         postprocess(responses[idx].meta_data.output, batched_filenames[idx],
             idx, FLAGS.batch_size, FLAGS.classes,
             FLAGS.verbose or multiple_inputs)
+
+    print('>>>>>>>>>>> total time: ', time.time() - start_time)

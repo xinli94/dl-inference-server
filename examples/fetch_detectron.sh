@@ -1,3 +1,4 @@
+#!/bin/bash
 # Copyright (c) 2018, NVIDIA CORPORATION. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -24,42 +25,18 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-FROM ubuntu:16.04
+set -ex
 
-# Build for Python 3.5
-# ARG PYVER=3.5
-ARG PYVER=2.7
+# Caffe2 resnet50
+# mkdir -p models/detectron/1
+# wget -O models/detectron/1/model.netdef \
+#      http://download.caffe2.ai.s3.amazonaws.com/models/detectron/e2e_faster_rcnn_R-50-C4_1x/predict_net.pb
+# wget -O models/detectron/1/init_model.netdef \
+#      http://download.caffe2.ai.s3.amazonaws.com/models/detectron/e2e_faster_rcnn_R-50-C4_1x/init_net.pb
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-            software-properties-common \
-            autoconf \
-            automake \
-            build-essential \
-            curl \
-            git \
-            libcurl3-dev \
-            libopencv-dev \
-            libopencv-core-dev \
-            libtool \
-            pkg-config \
-            python$PYVER \
-            python$PYVER-dev && \
-    ldconfig
 
-# Make /usr/bin/python point to the $PYVER version of python
-RUN rm -f /usr/bin/python && \
-    rm -f /usr/bin/python`echo $PYVER | cut -c1-1` && \
-    ln -s /usr/bin/python$PYVER /usr/bin/python && \
-    ln -s /usr/bin/python$PYVER /usr/bin/python`echo $PYVER | cut -c1-1`
-
-RUN curl -O https://bootstrap.pypa.io/get-pip.py && \
-    python$PYVER get-pip.py && \
-    rm get-pip.py
-
-RUN pip install --upgrade setuptools grpcio-tools
-
-WORKDIR /workspace
-COPY Makefile.clients .
-COPY src src
-RUN make -j4 -f Makefile.clients all pip
+mkdir -p models/detectron/2
+wget -O models/detectron/2/model.netdef \
+     http://download.caffe2.ai.s3.amazonaws.com/models/detectron/e2e_faster_rcnn_R-50-C4_2x/predict_net.pb
+wget -O models/detectron/2/init_model.netdef \
+     http://download.caffe2.ai.s3.amazonaws.com/models/detectron/e2e_faster_rcnn_R-50-C4_2x/init_net.pb
