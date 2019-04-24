@@ -192,10 +192,11 @@ def preprocess(img, format, dtype, c, h, w, scaling):
 def preprocess_xin(image_name, h, w):
     import cv2
     image = cv2.imread(image_name)
-    resized = cv2.resize(image, (5,5))
+    resized = cv2.resize(image, (h,w))
     scaled = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
 
-    scaled = np.float32(scaled)
+    # scaled = np.float32(scaled)
+    scaled = np.uint8(scaled)
 
     # image = Image.open(image_name)
     # scaled = np.float32(np.array(image.resize((w, h))))
@@ -213,7 +214,7 @@ def preprocess_xin(image_name, h, w):
         print '>>>>>>> swap to NHWC'
         ordered = scaled
 
-    print '>>>>>>>>>', ordered
+    print '>>>>>>>>>', ordered.shape
 
     return ordered
 
@@ -296,6 +297,7 @@ if __name__ == '__main__':
                         metavar='FILE', help='Write preprocessed image to specified file.')
     parser.add_argument('image_filename', type=str, nargs='?', default=None,
                         help='Input image.')
+    parser.add_argument('--new_preprocess', action='store_true', default=False)
     FLAGS = parser.parse_args()
 
     # Create gRPC stub for communicating with the server
@@ -383,11 +385,11 @@ if __name__ == '__main__':
         batched_filenames.append([FLAGS.image_filename])
         # Load and preprocess the image
 
-
-        # img = Image.open(FLAGS.image_filename)
-        # input_tensor = preprocess(img, format, dtype, c, h, w, FLAGS.scaling)
-
-        input_tensor = preprocess_xin(FLAGS.image_filename, h, w)
+        if not FLAGS.new_preprocess:
+            img = Image.open(FLAGS.image_filename)
+            input_tensor = preprocess(img, format, dtype, c, h, w, FLAGS.scaling)
+        else:
+            input_tensor = preprocess_xin(FLAGS.image_filename, h, w)
 
         request.meta_data.input.add(
             name=input_name, byte_size=input_tensor.size * input_tensor.itemsize)
